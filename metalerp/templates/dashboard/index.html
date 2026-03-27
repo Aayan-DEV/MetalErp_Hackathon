@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Stremet{% endblock %}
+
+{% block content %}
+<div class="dashboard-hero">
+    <div class="dashboard-header">
+        <h1 class="text-3xl font-bold text-gray-900 tracking-tight">Dashboard</h1>
+        <p class="text-sm text-gray-400 mt-1">{{ today|default:"27 March 2026" }}</p>
+    </div>
+
+    <div class="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-5 mt-8">
+
+        <!-- Total Materials -->
+        <div class="stat-card glass" style="animation-delay: 0s">
+            <div class="stat-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+                    <path d="m3.3 7 8.7 5 8.7-5"/>
+                    <path d="M12 22V12"/>
+                </svg>
+            </div>
+            <div class="stat-card-value" data-count="{{ stats.total_materials }}">0</div>
+            <div class="stat-card-label">Total Materials</div>
+        </div>
+
+        <!-- Pending Deliveries -->
+        <div class="stat-card glass" style="animation-delay: 0.05s">
+            <div class="stat-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/>
+                    <path d="M15 18H9"/>
+                    <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>
+                    <circle cx="17" cy="18" r="2"/>
+                    <circle cx="7" cy="18" r="2"/>
+                </svg>
+            </div>
+            <div class="stat-card-value" data-count="{{ stats.pending_deliveries }}">0</div>
+            <div class="stat-card-label">Pending Deliveries</div>
+        </div>
+
+        <!-- Active Manufacturing -->
+        <div class="stat-card glass" style="animation-delay: 0.1s">
+            <div class="stat-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/>
+                </svg>
+            </div>
+            <div class="stat-card-value" data-count="{{ stats.active_manufacturing }}">0</div>
+            <div class="stat-card-label">Active Manufacturing</div>
+        </div>
+
+        <!-- Completed Orders -->
+        <div class="stat-card glass" style="animation-delay: 0.15s">
+            <div class="stat-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                    <polyline points="22 4 12 14.01 9 11.01"/>
+                </svg>
+            </div>
+            <div class="stat-card-value" data-count="{{ stats.completed_orders }}">0</div>
+            <div class="stat-card-label">Completed Orders</div>
+        </div>
+
+        <!-- Storage Utilization -->
+        <div class="stat-card glass" style="animation-delay: 0.2s">
+            <div class="stat-card-icon">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M22 8.35V20a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8.35A2 2 0 0 1 3.26 6.5l8-3.2a2 2 0 0 1 1.48 0l8 3.2A2 2 0 0 1 22 8.35Z"/>
+                    <path d="M6 18h12"/>
+                    <path d="M6 14h12"/>
+                    <rect x="6" y="10" width="12" height="12" rx="0" fill="none"/>
+                </svg>
+            </div>
+            <div class="stat-card-value">{{ stats.storage_utilization }}%</div>
+            <div class="stat-card-label">Storage Utilization</div>
+        </div>
+
+    </div>
+
+    <!-- Quick Navigation -->
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-5 mt-8">
+        <a href="{% url 'dashboard:delivery' %}" class="quick-nav-card glass">
+            <div class="flex items-center gap-4">
+                <div class="quick-nav-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/>
+                        <path d="M15 18H9"/>
+                        <path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/>
+                        <circle cx="17" cy="18" r="2"/>
+                        <circle cx="7" cy="18" r="2"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="text-gray-900 font-semibold text-base">Delivery Management</div>
+                    <div class="text-gray-400 text-sm mt-0.5">{{ stats.pending_deliveries }} pending deliveries awaiting storage</div>
+                </div>
+            </div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-300"><path d="m9 18 6-6-6-6"/></svg>
+        </a>
+
+        <a href="{% url 'dashboard:manufacturing' %}" class="quick-nav-card glass">
+            <div class="flex items-center gap-4">
+                <div class="quick-nav-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M2 20a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8l-7 5V8l-7 5V4a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/>
+                    </svg>
+                </div>
+                <div>
+                    <div class="text-gray-900 font-semibold text-base">Manufacturing</div>
+                    <div class="text-gray-400 text-sm mt-0.5">{{ stats.active_manufacturing }} active work orders in progress</div>
+                </div>
+            </div>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-300"><path d="m9 18 6-6-6-6"/></svg>
+        </a>
+    </div>
+</div>
+{% endblock %}

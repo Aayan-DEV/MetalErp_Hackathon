@@ -1,0 +1,471 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Delivery - Stremet{% endblock %}
+{% block page_title %}Delivery{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<!-- Toolbar: Search + Add Delivery -->
+<div class="delivery-toolbar">
+    <div class="content-search">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,0.3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" placeholder="Search deliveries, manufacturers, batches..." id="searchInput">
+    </div>
+    <button class="btn-add-delivery" onclick="openAddDeliveryModal()">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New Delivery
+    </button>
+</div>
+
+<!-- CSRF Token -->
+{% csrf_token %}
+
+<!-- Deliveries Table -->
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Delivery #</th>
+                <th>Material ID</th>
+                <th>Manufacturer</th>
+                <th>Date</th>
+                <th>Size</th>
+                <th>Batch ID</th>
+                <th>Quantity</th>
+                <th>Shelf</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for d in deliveries %}
+            <tr data-shelf="{{ d.shelf_id }}">
+                <td class="cell-id">#{{ d.id }}</td>
+                <td class="cell-mono">{% if d.material_id %}M-{{ d.material_id }}{% else %}—{% endif %}</td>
+                <td class="cell-name">{{ d.manufacturer }}</td>
+                <td>{{ d.date }}</td>
+                <td class="cell-mono">{{ d.size }}</td>
+                <td class="cell-mono">{{ d.batch_id }}</td>
+                <td>{{ d.quantity }}</td>
+                <td class="cell-mono">{{ d.shelf_id }}</td>
+                <td><span class="status-badge {{ d.status }}">{{ d.status|title }}</span></td>
+                <td>
+                    <button class="btn-arrived" onclick="Shelf3D.open('{{ d.shelf_id }}')">
+                        Arrived
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- 3D Shelf Modal (Dual View) -->
+<div class="shelf-modal-overlay" id="shelfModalOverlay">
+    <div class="shelf-modal glass">
+        <div class="shelf-modal-top">
+            <div class="shelf-modal-tags" id="shelfModalHeader"></div>
+            <button class="shelf-modal-close" onclick="Shelf3D.close()" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+
+        <div class="shelf-modal-body dual-view">
+            <div class="view-pane view-topdown">
+                <div class="view-label">Top View</div>
+                <canvas id="topdownCanvas"></canvas>
+            </div>
+            <div class="view-pane view-3d">
+                <div class="view-label">3D View</div>
+                <div class="three-container" id="threeContainer"></div>
+
+                <div class="capacity-overlay">
+                    <svg class="capacity-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="4"/>
+                        <circle id="capacityRing" cx="40" cy="40" r="36" fill="none" stroke="rgba(0,0,0,0.6)" stroke-width="4"
+                                stroke-dasharray="226.2" stroke-dashoffset="226.2"
+                                stroke-linecap="round" transform="rotate(-90 40 40)"
+                                style="transition: stroke-dashoffset 0.6s ease"/>
+                    </svg>
+                    <div class="capacity-text">
+                        <span id="capacityPercent" class="capacity-percent">0%</span>
+                        <span class="capacity-label">Capacity</span>
+                    </div>
+                </div>
+
+                <div class="shelf-3d-label" id="shelfLabel3D"></div>
+            </div>
+        </div>
+
+        <div class="shelf-modal-footer">
+            <span id="shelfCapacity" class="shelf-capacity-text">0% Full</span>
+            <button id="markStoredBtn" class="btn-mark-stored" onclick="Shelf3D.markStored()">
+                Mark as Stored
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Add Delivery Modal -->
+<div class="add-delivery-overlay" id="addDeliveryOverlay">
+    <div class="add-delivery-modal">
+        <div class="add-delivery-header">
+            <h2><span class="sensor-dot"></span> New Delivery Detected</h2>
+            <button class="shelf-modal-close" onclick="closeAddDeliveryModal()" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+        <p class="add-delivery-hint">Sensor detected new material on the dock. Verify or edit details below.</p>
+        <div class="form-grid">
+            <div class="form-field">
+                <label>Manufacturer</label>
+                <input type="text" id="addManufacturer">
+            </div>
+            <div class="form-field">
+                <label>Date</label>
+                <input type="date" id="addDate">
+            </div>
+            <div class="form-field">
+                <label>Material Size</label>
+                <input type="text" id="addSize">
+            </div>
+            <div class="form-field">
+                <label>Batch ID</label>
+                <input type="text" id="addBatchId">
+            </div>
+            <div class="form-field">
+                <label>Quantity</label>
+                <input type="text" id="addQuantity">
+            </div>
+            <div class="form-field">
+                <label>Shelf Location</label>
+                <input type="text" id="addShelfId" placeholder="e.g. 3-B-2">
+            </div>
+        </div>
+        <div class="add-delivery-footer">
+            <button class="btn-regenerate" onclick="regenerateDelivery()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+                Regenerate
+            </button>
+            <button class="btn-confirm-delivery" onclick="confirmDelivery()">
+                Confirm Delivery
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- Shipment Detection Wizard -->
+<div class="shipment-wizard-overlay" id="shipmentWizardOverlay">
+    <div class="shipment-wizard-modal">
+        <div class="wizard-header">
+            <div class="wizard-step-indicator">
+                <span class="wizard-dot active" data-step="0">1</span>
+                <span class="wizard-dot-line"></span>
+                <span class="wizard-dot" data-step="1">2</span>
+                <span class="wizard-dot-line"></span>
+                <span class="wizard-dot" data-step="2">3</span>
+                <span class="wizard-dot-line"></span>
+                <span class="wizard-dot" data-step="3">4</span>
+            </div>
+            <button class="shelf-modal-close" onclick="closeShipmentWizard()" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+
+        <!-- Step 1: Scanning -->
+        <div class="wizard-step active" id="wizardStep0">
+            <div class="scan-container">
+                <div class="scan-ring"></div>
+                <div class="scan-ring scan-ring-2"></div>
+                <div class="scan-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
+                </div>
+            </div>
+            <h3 class="scan-title" id="scanTitle">Scanning dock area...</h3>
+            <p class="scan-subtitle" id="scanSubtitle">Detecting incoming shipment</p>
+        </div>
+
+        <!-- Step 2: Detected Details -->
+        <div class="wizard-step" id="wizardStep1">
+            <h3 class="wizard-section-title">Shipment Detected</h3>
+            <p class="wizard-section-subtitle">The following pallets were detected on the dock.</p>
+            <div class="wizard-pallets" id="wizardPallets"></div>
+        </div>
+
+        <!-- Step 3: Assign Locations -->
+        <div class="wizard-step" id="wizardStep2">
+            <h3 class="wizard-section-title">Assign Shelf Locations</h3>
+            <p class="wizard-section-subtitle">Verify or edit shelf assignments for each pallet.</p>
+            <div class="wizard-pallets" id="wizardAssign"></div>
+        </div>
+
+        <!-- Step 4: Confirm -->
+        <div class="wizard-step" id="wizardStep3">
+            <h3 class="wizard-section-title">Confirm Placement</h3>
+            <p class="wizard-section-subtitle">Review and confirm all pallet assignments.</p>
+            <div class="wizard-summary" id="wizardSummary"></div>
+        </div>
+
+        <div class="wizard-nav" id="wizardNav" style="display:none;">
+            <button class="btn-regenerate" id="wizardBackBtn" onclick="wizardBack()">Back</button>
+            <button class="btn-confirm-delivery" id="wizardNextBtn" onclick="wizardNext()">Next</button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/shelf3d.js' %}"></script>
+<script>
+var _addDeliveryMaterialId = null;
+
+function openAddDeliveryModal() {
+    document.getElementById('addDeliveryOverlay').classList.add('active');
+    document.body.style.overflow = 'hidden';
+    regenerateDelivery();
+}
+
+function closeAddDeliveryModal() {
+    document.getElementById('addDeliveryOverlay').classList.remove('active');
+    document.body.style.overflow = '';
+}
+
+function regenerateDelivery() {
+    fetch('/api/generate-delivery/')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('addManufacturer').value = data.manufacturer;
+            document.getElementById('addDate').value = data.date;
+            document.getElementById('addSize').value = data.size;
+            document.getElementById('addBatchId').value = data.batch_id;
+            document.getElementById('addQuantity').value = data.quantity;
+            document.getElementById('addShelfId').value = data.shelf_id;
+            _addDeliveryMaterialId = data.material_id;
+        });
+}
+
+function confirmDelivery() {
+    var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    var payload = {
+        manufacturer: document.getElementById('addManufacturer').value,
+        date: document.getElementById('addDate').value,
+        size: document.getElementById('addSize').value,
+        batch_id: document.getElementById('addBatchId').value,
+        quantity: document.getElementById('addQuantity').value,
+        shelf_id: document.getElementById('addShelfId').value,
+        material_id: _addDeliveryMaterialId
+    };
+
+    fetch('/api/add-delivery/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+        body: JSON.stringify(payload)
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.error) { alert(data.error); return; }
+        var tbody = document.querySelector('.data-table tbody');
+        var tr = document.createElement('tr');
+        tr.dataset.shelf = data.shelf_id;
+        tr.innerHTML =
+            '<td class="cell-id">#' + data.id + '</td>' +
+            '<td class="cell-mono">' + (data.material_id ? 'M-' + data.material_id : '\u2014') + '</td>' +
+            '<td class="cell-name">' + data.manufacturer + '</td>' +
+            '<td>' + data.date + '</td>' +
+            '<td class="cell-mono">' + data.size + '</td>' +
+            '<td class="cell-mono">' + data.batch_id + '</td>' +
+            '<td>' + data.quantity + '</td>' +
+            '<td class="cell-mono">' + data.shelf_id + '</td>' +
+            '<td><span class="status-badge pending">Pending</span></td>' +
+            '<td><button class="btn-arrived" onclick="Shelf3D.open(\'' + data.shelf_id + '\')">Arrived</button></td>';
+        tbody.insertBefore(tr, tbody.firstChild);
+        closeAddDeliveryModal();
+    });
+}
+
+// =============================================
+// Shipment Detection Wizard (N key)
+// =============================================
+var wizardStep = 0;
+var wizardPallets = [];
+
+function openShipmentWizard() {
+    wizardStep = 0;
+    wizardPallets = [];
+    document.getElementById('shipmentWizardOverlay').classList.add('active');
+    document.body.style.overflow = 'hidden';
+    showWizardStep(0);
+    document.getElementById('wizardNav').style.display = 'none';
+
+    // Step 1: scanning animation, then auto-advance
+    var title = document.getElementById('scanTitle');
+    var subtitle = document.getElementById('scanSubtitle');
+    title.textContent = 'Scanning dock area...';
+    subtitle.textContent = 'Detecting incoming shipment';
+
+    setTimeout(function() {
+        title.textContent = 'Shipment Detected!';
+        subtitle.textContent = 'Preparing pallet details...';
+    }, 1500);
+
+    // Generate 2-4 random pallets
+    var count = 2 + Math.floor(Math.random() * 3);
+    var promises = [];
+    for (var i = 0; i < count; i++) {
+        promises.push(fetch('/api/generate-delivery/').then(function(r) { return r.json(); }));
+    }
+
+    Promise.all(promises).then(function(results) {
+        wizardPallets = results;
+        setTimeout(function() {
+            renderWizardStep1();
+            wizardStep = 1;
+            showWizardStep(1);
+            document.getElementById('wizardNav').style.display = 'flex';
+            document.getElementById('wizardBackBtn').style.display = 'none';
+        }, 2500);
+    });
+}
+
+function closeShipmentWizard() {
+    document.getElementById('shipmentWizardOverlay').classList.remove('active');
+    document.body.style.overflow = '';
+}
+
+function showWizardStep(step) {
+    for (var i = 0; i < 4; i++) {
+        var el = document.getElementById('wizardStep' + i);
+        if (el) el.classList.toggle('active', i === step);
+        var dot = document.querySelector('.wizard-dot[data-step="' + i + '"]');
+        if (dot) {
+            dot.classList.toggle('active', i <= step);
+            dot.classList.toggle('current', i === step);
+        }
+    }
+}
+
+function renderWizardStep1() {
+    var container = document.getElementById('wizardPallets');
+    container.innerHTML = '';
+    wizardPallets.forEach(function(p, i) {
+        container.innerHTML +=
+            '<div class="pallet-card glass">' +
+            '<div class="pallet-card-header">Pallet ' + (i + 1) + '</div>' +
+            '<div class="pallet-card-grid">' +
+            '<div class="pallet-detail"><span class="pallet-label">Manufacturer</span><span class="pallet-value">' + p.manufacturer + '</span></div>' +
+            '<div class="pallet-detail"><span class="pallet-label">Size</span><span class="pallet-value">' + p.size + '</span></div>' +
+            '<div class="pallet-detail"><span class="pallet-label">Batch</span><span class="pallet-value">' + p.batch_id + '</span></div>' +
+            '<div class="pallet-detail"><span class="pallet-label">Quantity</span><span class="pallet-value">' + p.quantity + '</span></div>' +
+            '<div class="pallet-detail"><span class="pallet-label">Material</span><span class="pallet-value">' + (p.material_name || '\u2014') + '</span></div>' +
+            '</div></div>';
+    });
+}
+
+function renderWizardStep2() {
+    var container = document.getElementById('wizardAssign');
+    container.innerHTML = '';
+    wizardPallets.forEach(function(p, i) {
+        container.innerHTML +=
+            '<div class="pallet-card glass">' +
+            '<div class="pallet-card-header">Pallet ' + (i + 1) + ' — ' + p.manufacturer + '</div>' +
+            '<div class="pallet-assign-row">' +
+            '<span class="pallet-label">' + p.size + ' · ' + p.quantity + '</span>' +
+            '<input type="text" class="wizard-shelf-input" id="wizardShelf' + i + '" value="' + p.shelf_id + '" placeholder="e.g. 3-B-2">' +
+            '</div></div>';
+    });
+}
+
+function renderWizardStep3() {
+    // Read updated shelf assignments
+    wizardPallets.forEach(function(p, i) {
+        var input = document.getElementById('wizardShelf' + i);
+        if (input) p.shelf_id = input.value;
+    });
+
+    var container = document.getElementById('wizardSummary');
+    var html = '<table class="data-table wizard-summary-table"><thead><tr><th>#</th><th>Manufacturer</th><th>Size</th><th>Qty</th><th>Shelf</th></tr></thead><tbody>';
+    wizardPallets.forEach(function(p, i) {
+        html += '<tr><td>' + (i + 1) + '</td><td>' + p.manufacturer + '</td><td class="cell-mono">' + p.size + '</td><td>' + p.quantity + '</td><td class="cell-mono">' + p.shelf_id + '</td></tr>';
+    });
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+function wizardBack() {
+    if (wizardStep > 1) {
+        wizardStep--;
+        showWizardStep(wizardStep);
+        document.getElementById('wizardBackBtn').style.display = wizardStep <= 1 ? 'none' : '';
+        document.getElementById('wizardNextBtn').textContent = 'Next';
+    }
+}
+
+function wizardNext() {
+    if (wizardStep === 1) {
+        renderWizardStep2();
+        wizardStep = 2;
+        showWizardStep(2);
+        document.getElementById('wizardBackBtn').style.display = '';
+    } else if (wizardStep === 2) {
+        renderWizardStep3();
+        wizardStep = 3;
+        showWizardStep(3);
+        document.getElementById('wizardNextBtn').textContent = 'Place Shipment';
+    } else if (wizardStep === 3) {
+        placeShipment();
+    }
+}
+
+function placeShipment() {
+    var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]').value;
+    var btn = document.getElementById('wizardNextBtn');
+    btn.disabled = true;
+    btn.textContent = 'Placing...';
+
+    var promises = wizardPallets.map(function(p) {
+        return fetch('/api/add-delivery/', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+            body: JSON.stringify({
+                manufacturer: p.manufacturer,
+                date: p.date,
+                size: p.size,
+                batch_id: p.batch_id,
+                quantity: p.quantity,
+                shelf_id: p.shelf_id,
+                material_id: p.material_id
+            })
+        }).then(function(r) { return r.json(); });
+    });
+
+    Promise.all(promises).then(function(results) {
+        var tbody = document.querySelector('.data-table tbody');
+        results.forEach(function(data) {
+            if (data.error) return;
+            var tr = document.createElement('tr');
+            tr.dataset.shelf = data.shelf_id;
+            tr.innerHTML =
+                '<td class="cell-id">#' + data.id + '</td>' +
+                '<td class="cell-mono">' + (data.material_id ? 'M-' + data.material_id : '\u2014') + '</td>' +
+                '<td class="cell-name">' + data.manufacturer + '</td>' +
+                '<td>' + data.date + '</td>' +
+                '<td class="cell-mono">' + data.size + '</td>' +
+                '<td class="cell-mono">' + data.batch_id + '</td>' +
+                '<td>' + data.quantity + '</td>' +
+                '<td class="cell-mono">' + data.shelf_id + '</td>' +
+                '<td><span class="status-badge pending">Pending</span></td>' +
+                '<td><button class="btn-arrived" onclick="Shelf3D.open(\'' + data.shelf_id + '\')">Arrived</button></td>';
+            tbody.insertBefore(tr, tbody.firstChild);
+        });
+        closeShipmentWizard();
+        btn.disabled = false;
+        btn.textContent = 'Place Shipment';
+    });
+}
+</script>
+{% endblock %}

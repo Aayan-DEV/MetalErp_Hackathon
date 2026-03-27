@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Manufacturing - Stremet{% endblock %}
+{% block page_title %}Manufacturing{% endblock %}
+
+{% block extra_head %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<!-- Search -->
+<div class="content-search">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgba(0,0,0,0.3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" placeholder="Search work orders, products, batches..." id="searchInput">
+</div>
+
+<!-- CSRF Token -->
+{% csrf_token %}
+
+<!-- Work Orders Table -->
+<div class="table-container">
+    <table class="data-table">
+        <thead>
+            <tr>
+                <th>Work Order</th>
+                <th>Product</th>
+                <th>Batch</th>
+                <th>Start Date</th>
+                <th>Completion</th>
+                <th>Shelf</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for wo in work_orders %}
+            <tr data-shelf="{{ wo.shelf_id|default:'' }}">
+                <td class="cell-id">{{ wo.id }}</td>
+                <td class="cell-name">{{ wo.product }}</td>
+                <td class="cell-mono">{{ wo.batch }}</td>
+                <td>{{ wo.start }}</td>
+                <td>
+                    <div class="progress-bar">
+                        <div class="progress-fill {{ wo.status_class }}" style="width: {{ wo.completion }}%"></div>
+                        <span class="progress-text">{{ wo.completion }}%</span>
+                    </div>
+                </td>
+                <td class="cell-mono">{{ wo.shelf_id|default:"—" }}</td>
+                <td><span class="status-badge {{ wo.status_class }}">{{ wo.status }}</span></td>
+                <td>
+                    {% if wo.status == 'Completed' and wo.shelf_id %}
+                    <button class="btn-arrived" onclick="Shelf3D.open('{{ wo.shelf_id }}')">
+                        Store
+                    </button>
+                    {% elif wo.status == 'In Progress' %}
+                    <span class="text-gray-400 text-xs">In progress</span>
+                    {% else %}
+                    <span class="text-gray-400 text-xs">—</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- 3D Shelf Modal (Dual View) -->
+<div class="shelf-modal-overlay" id="shelfModalOverlay">
+    <div class="shelf-modal glass">
+        <div class="shelf-modal-top">
+            <div class="shelf-modal-tags" id="shelfModalHeader"></div>
+            <button class="shelf-modal-close" onclick="Shelf3D.close()" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+        </div>
+
+        <div class="shelf-modal-body dual-view">
+            <div class="view-pane view-topdown">
+                <div class="view-label">Top View</div>
+                <canvas id="topdownCanvas"></canvas>
+            </div>
+            <div class="view-pane view-3d">
+                <div class="view-label">3D View</div>
+                <div class="three-container" id="threeContainer"></div>
+
+                <div class="capacity-overlay">
+                    <svg class="capacity-ring-svg" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="36" fill="none" stroke="rgba(0,0,0,0.08)" stroke-width="4"/>
+                        <circle id="capacityRing" cx="40" cy="40" r="36" fill="none" stroke="rgba(0,0,0,0.6)" stroke-width="4"
+                                stroke-dasharray="226.2" stroke-dashoffset="226.2"
+                                stroke-linecap="round" transform="rotate(-90 40 40)"
+                                style="transition: stroke-dashoffset 0.6s ease"/>
+                    </svg>
+                    <div class="capacity-text">
+                        <span id="capacityPercent" class="capacity-percent">0%</span>
+                        <span class="capacity-label">Capacity</span>
+                    </div>
+                </div>
+
+                <div class="shelf-3d-label" id="shelfLabel3D"></div>
+            </div>
+        </div>
+
+        <div class="shelf-modal-footer">
+            <span id="shelfCapacity" class="shelf-capacity-text">0% Full</span>
+            <button id="markStoredBtn" class="btn-mark-stored" onclick="Shelf3D.markStored()">
+                Mark as Stored
+            </button>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script src="{% static 'js/shelf3d.js' %}"></script>
+{% endblock %}
