@@ -26,7 +26,7 @@
                 </svg>
             </div>
             <div class="stat-card-value" data-count="{{ stats.total_materials }}">0</div>
-            <div class="stat-card-label">Total Materials</div>
+            <div class="stat-card-label">Total Raw Materials</div>
         </div>
 
         <!-- Pending Deliveries -->
@@ -41,7 +41,7 @@
                 </svg>
             </div>
             <div class="stat-card-value" data-count="{{ stats.pending_deliveries }}">0</div>
-            <div class="stat-card-label">Pending Deliveries</div>
+            <div class="stat-card-label">Unstocked Palets</div>
         </div>
 
         <!-- Completed Orders -->
@@ -234,19 +234,24 @@
                 {
                     label: 'PASS',
                     data: passData,
-                    backgroundColor: 'rgba(34, 197, 94, 0.7)',
-                    borderColor: 'rgba(34, 197, 94, 0.9)',
-                    pointRadius: 6,
-                    pointHoverRadius: 9,
+                    backgroundColor: 'rgba(34, 197, 94, 0.55)',
+                    borderColor: 'rgba(34, 197, 94, 0.85)',
+                    borderWidth: 2,
+                    pointRadius: 7,
+                    pointHoverRadius: 12,
+                    pointHoverBorderWidth: 3,
                     pointStyle: 'circle',
                 },
                 {
                     label: 'FAIL',
                     data: failData,
-                    backgroundColor: 'rgba(220, 38, 38, 0.7)',
-                    borderColor: 'rgba(220, 38, 38, 0.9)',
-                    pointRadius: 8,
-                    pointHoverRadius: 11,
+                    backgroundColor: 'rgba(220, 38, 38, 0.55)',
+                    borderColor: 'rgba(220, 38, 38, 0.85)',
+                    borderWidth: 2,
+                    pointRadius: 9,
+                    pointHoverRadius: 14,
+                    pointHoverBorderWidth: 3,
+                    pointHoverBackgroundColor: 'rgba(220, 38, 38, 0.9)',
                     pointStyle: 'crossRot',
                 }
             ]
@@ -259,9 +264,8 @@
                     var el = elements[0];
                     var ds = chart.data.datasets[el.datasetIndex];
                     var point = ds.data[el.index];
-                    if (ds.label === 'FAIL' && point.created_at_iso) {
-                        window.location.href = '/logs/?order=' + encodeURIComponent(point.order_id) +
-                            '&around=' + encodeURIComponent(point.created_at_iso);
+                    if (ds.label === 'FAIL') {
+                        window.location.href = '/logs/?order=' + encodeURIComponent(point.order_id);
                     }
                 }
             },
@@ -270,29 +274,49 @@
                     position: 'top',
                     align: 'end',
                     labels: {
-                        color: '#666',
-                        font: { family: 'DM Sans', size: 12, weight: '500' },
+                        color: '#555',
+                        font: { family: "'DM Sans', sans-serif", size: 13, weight: '600' },
                         usePointStyle: true,
-                        padding: 16,
+                        padding: 20,
                     }
                 },
                 tooltip: {
-                    backgroundColor: 'rgba(20, 20, 20, 0.9)',
-                    titleFont: { family: 'DM Sans', size: 13, weight: '600' },
-                    bodyFont: { family: 'DM Sans', size: 12 },
-                    padding: 12,
-                    cornerRadius: 10,
+                    enabled: true,
+                    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+                    titleColor: '#1A1A1A',
+                    bodyColor: '#555',
+                    borderColor: 'rgba(0, 0, 0, 0.08)',
+                    borderWidth: 1,
+                    titleFont: { family: "'DM Sans', sans-serif", size: 14, weight: '700' },
+                    bodyFont: { family: "'DM Sans', sans-serif", size: 12.5, weight: '400' },
+                    footerFont: { family: "'DM Sans', sans-serif", size: 11, weight: '500' },
+                    footerColor: '#999',
+                    padding: { top: 14, bottom: 14, left: 16, right: 16 },
+                    cornerRadius: 12,
+                    boxPadding: 6,
+                    bodySpacing: 5,
+                    caretSize: 8,
+                    caretPadding: 10,
+                    displayColors: false,
                     callbacks: {
                         title: function(items) {
                             var p = items[0].raw;
-                            return p.order_id + ' \u2014 ' + p.product;
+                            return p.order_id + '  \u2014  ' + p.product;
                         },
                         label: function(item) {
                             var p = item.raw;
-                            var lines = ['Quality: ' + p.quality, 'Status: ' + p.status];
+                            var lines = [];
+                            lines.push('Quality: ' + p.quality + '     Status: ' + p.status);
                             if (p.defect_machine) lines.push('Failed at: ' + p.defect_machine);
                             if (p.defect_type) lines.push('Defect: ' + p.defect_type);
                             return lines;
+                        },
+                        footer: function(items) {
+                            var p = items[0].raw;
+                            if (p.quality === 'FAIL' || p.status === 'defected') {
+                                return '\u2192 Click to view failure logs';
+                            }
+                            return '';
                         }
                     }
                 }
@@ -301,16 +325,16 @@
                 x: {
                     type: 'time',
                     time: { unit: 'hour', displayFormats: { hour: 'MMM d, ha' } },
-                    grid: { display: false },
+                    grid: { color: 'rgba(0,0,0,0.03)', drawTicks: false },
                     border: { display: true, color: '#E0E0E0' },
-                    ticks: { color: '#999', font: { family: 'DM Sans', size: 11 } },
-                    title: { display: true, text: 'Time', color: '#999', font: { family: 'DM Sans', size: 12 } }
+                    ticks: { color: '#888', font: { family: "'DM Sans', sans-serif", size: 11.5, weight: '500' }, padding: 8 },
+                    title: { display: true, text: 'Time', color: '#999', font: { family: "'DM Sans', sans-serif", size: 13, weight: '600' }, padding: { top: 8 } }
                 },
                 y: {
-                    grid: { display: false },
+                    grid: { color: 'rgba(0,0,0,0.03)', drawTicks: false },
                     border: { display: true, color: '#E0E0E0' },
-                    ticks: { color: '#999', font: { family: 'DM Sans', size: 11 }, stepSize: 1 },
-                    title: { display: true, text: 'Order #', color: '#999', font: { family: 'DM Sans', size: 12 } }
+                    ticks: { color: '#888', font: { family: "'DM Sans', sans-serif", size: 11.5, weight: '500' }, stepSize: 1, padding: 8 },
+                    title: { display: true, text: 'Order #', color: '#999', font: { family: "'DM Sans', sans-serif", size: 13, weight: '600' }, padding: { bottom: 8 } }
                 }
             }
         }

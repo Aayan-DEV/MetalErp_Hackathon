@@ -3,13 +3,13 @@ import random
 import uuid
 import datetime
 from datetime import date
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 from django.db import models
 from django.db.models import Count
 from django.utils import timezone
-from .models import Warehouse, Material, Delivery, ShelfSlot, ManufacturingOrder, MachineHealth, ScrapEvent, GlobalLog
+from .models import Warehouse, Material, Delivery, ShelfSlot, WarehouseCell, ManufacturingOrder, MachineHealth, ScrapEvent, GlobalLog, AISettings, MaintenanceEntry
 import math
 
 
@@ -27,12 +27,40 @@ def log_event(event_type, severity, title, description='', **kwargs):
 
 
 # =============================================
-# Warehouse Hierarchy Constants
+# Warehouse Hierarchy Constants (legacy defaults)
 # =============================================
 SECTORS = list(range(1, 8))           # Sectors 1-7
 UNITS = ['A', 'B', 'C', 'D']         # Units per sector
 SHELVES_PER_UNIT = 6                  # Shelves per unit
 SLOTS_PER_SHELF = 4                   # 1 row x 4 cols
+
+
+def _get_warehouse_config(warehouse):
+    """Return warehouse layout config. Uses DB values if configured, else legacy defaults."""
+    if warehouse and warehouse.layout_configured:
+        # Build sectors/units from WarehouseCell storage cells
+        cells = WarehouseCell.objects.filter(warehouse=warehouse, cell_type='storage')
+        sectors_set = set()
+        units_set = set()
+        for c in cells:
+            if c.sector is not None:
+                sectors_set.add(c.sector)
+                if c.unit:
+                    units_set.add(c.unit)
+        sectors = sorted(sectors_set) if sectors_set else SECTORS
+        units = sorted(units_set) if units_set else UNITS
+        return {
+            'sectors': sectors,
+            'units': units,
+            'shelves_per_unit': warehouse.shelves_per_unit,
+            'slots_per_shelf': warehouse.slots_per_shelf,
+        }
+    return {
+        'sectors': SECTORS,
+        'units': UNITS,
+        'shelves_per_unit': SHELVES_PER_UNIT,
+        'slots_per_shelf': SLOTS_PER_SHELF,
+    }
 
 
 def _get_current_warehouse(request):
@@ -74,14 +102,16 @@ MATERIAL_SIZES = [
 
 
 def _get_shelf_capacity(shelf_id, warehouse=None):
+    cfg = _get_warehouse_config(warehouse)
+    slots_per_shelf = cfg['slots_per_shelf']
     qs = ShelfSlot.objects.filter(shelf_id=shelf_id, is_occupied=True)
     if warehouse:
         qs = qs.filter(warehouse=warehouse)
     slots = qs.select_related('delivery')
     occupied_slots = sorted([s.slot_index for s in slots])
     occupied_count = len(occupied_slots)
-    percentage = round(occupied_count / SLOTS_PER_SHELF * 100)
-    available = [i for i in range(SLOTS_PER_SHELF) if i not in occupied_slots]
+    percentage = round(occupied_count / slots_per_shelf * 100) if slots_per_shelf > 0 else 0
+    available = [i for i in range(slots_per_shelf) if i not in occupied_slots]
 
     # Track recently stored slots (within last 5 minutes)
     recent_cutoff = timezone.now() - datetime.timedelta(minutes=5)
@@ -91,7 +121,7 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
             recently_stored.append(s.slot_index)
 
     return {
-        'total_slots': SLOTS_PER_SHELF,
+        'total_slots': slots_per_shelf,
         'occupied_slots': occupied_slots,
         'occupied_count': occupied_count,
         'percentage': percentage,
@@ -101,7 +131,8 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
 
 
 def _overall_utilization(warehouse=None):
-    total_slots = len(SECTORS) * len(UNITS) * SHELVES_PER_UNIT * SLOTS_PER_SHELF
+    cfg = _get_warehouse_config(warehouse)
+    total_slots = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
     qs = ShelfSlot.objects.filter(is_occupied=True)
     if warehouse:
         qs = qs.filter(warehouse=warehouse)
@@ -126,9 +157,10 @@ def shelf_info(request):
     sector, unit, target_shelf = parts[0], parts[1], parts[2]
     cap = _get_shelf_capacity(shelf_id, warehouse)
 
-    # Also return data for ALL 6 levels in this rack (sector-unit)
+    # Also return data for ALL levels in this rack (sector-unit)
+    cfg = _get_warehouse_config(warehouse)
     all_levels = {}
-    for level in range(1, SHELVES_PER_UNIT + 1):
+    for level in range(1, cfg['shelves_per_unit'] + 1):
         level_id = f'{sector}-{unit}-{level}'
         level_cap = _get_shelf_capacity(level_id, warehouse)
         all_levels[str(level)] = {
@@ -167,6 +199,8 @@ def shelf_info(request):
         'unit': unit,
         'shelf': target_shelf,
         'all_levels': all_levels,
+        'shelves_per_unit': cfg['shelves_per_unit'],
+        'slots_per_shelf': cfg['slots_per_shelf'],
         'has_pending_delivery': has_pending,
         'next_available_shelf': next_available_shelf,
         'pending_delivery_id': pending_delivery_id,
@@ -271,10 +305,11 @@ def generate_delivery(request):
 
     # Find best shelf and cap quantity to what fits
     shelf_id = _find_available_shelf(warehouse=warehouse)
+    cfg = _get_warehouse_config(warehouse)
     shelf_qs = ShelfSlot.objects.filter(shelf_id=shelf_id, is_occupied=True)
     if warehouse:
         shelf_qs = shelf_qs.filter(warehouse=warehouse)
-    shelf_free = SLOTS_PER_SHELF - shelf_qs.count()
+    shelf_free = cfg['slots_per_shelf'] - shelf_qs.count()
     max_qty = min(4, max(1, shelf_free))
     quantity = str(random.randint(1, max_qty))
 
@@ -297,10 +332,16 @@ def generate_delivery(request):
 
 def _find_available_shelf(needed=1, warehouse=None):
     """Find a shelf that can fit `needed` pallets. Returns shelf with most space."""
+    cfg = _get_warehouse_config(warehouse)
+    sectors = cfg['sectors']
+    units = cfg['units']
+    shelves_per_unit = cfg['shelves_per_unit']
+    slots_per_shelf = cfg['slots_per_shelf']
+
     all_shelves = []
-    for s in SECTORS:
-        for u in UNITS:
-            for sh in range(1, SHELVES_PER_UNIT + 1):
+    for s in sectors:
+        for u in units:
+            for sh in range(1, shelves_per_unit + 1):
                 all_shelves.append(f'{s}-{u}-{sh}')
 
     # Get occupancy counts in one query
@@ -317,7 +358,7 @@ def _find_available_shelf(needed=1, warehouse=None):
     random.shuffle(all_shelves)  # randomize among equal candidates
     for shelf_id in all_shelves:
         occupied = occupied_counts.get(shelf_id, 0)
-        free = SLOTS_PER_SHELF - occupied
+        free = slots_per_shelf - occupied
         if free > best_free:
             best_free = free
             best_shelf = shelf_id
@@ -326,15 +367,17 @@ def _find_available_shelf(needed=1, warehouse=None):
         return best_shelf
 
     # Fallback
-    s = random.randint(1, 7)
-    u = random.choice(UNITS)
-    sh = random.randint(1, SHELVES_PER_UNIT)
+    s = random.choice(sectors) if sectors else 1
+    u = random.choice(units) if units else 'A'
+    sh = random.randint(1, shelves_per_unit)
     return f'{s}-{u}-{sh}'
 
 
 def _find_next_shelf_in_rack(sector, unit, current_shelf, warehouse=None):
     """Find the next available shelf in the same rack, then fallback to any shelf."""
-    for sh in list(range(current_shelf + 1, SHELVES_PER_UNIT + 1)) + list(range(1, current_shelf)):
+    cfg = _get_warehouse_config(warehouse)
+    shelves_per_unit = cfg['shelves_per_unit']
+    for sh in list(range(current_shelf + 1, shelves_per_unit + 1)) + list(range(1, current_shelf)):
         sid = f'{sector}-{unit}-{sh}'
         cap = _get_shelf_capacity(sid, warehouse)
         if cap['next_available'] is not None:
@@ -344,7 +387,8 @@ def _find_next_shelf_in_rack(sector, unit, current_shelf, warehouse=None):
 
 def _total_available_slots(warehouse=None):
     """Return total number of free slots across the entire warehouse."""
-    total = len(SECTORS) * len(UNITS) * SHELVES_PER_UNIT * SLOTS_PER_SHELF
+    cfg = _get_warehouse_config(warehouse)
+    total = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
     qs = ShelfSlot.objects.filter(is_occupied=True)
     if warehouse:
         qs = qs.filter(warehouse=warehouse)
@@ -423,17 +467,18 @@ def warehouse_map(request):
         delivery_qs.values_list('shelf_id', flat=True)
     )
 
+    cfg = _get_warehouse_config(warehouse)
+
     sectors = {}
-    for s in SECTORS:
-        units = {}
-        for u in UNITS:
+    for s in cfg['sectors']:
+        units_data = {}
+        for u in cfg['units']:
             shelves = {}
-            for sh in range(1, SHELVES_PER_UNIT + 1):
+            for sh in range(1, cfg['shelves_per_unit'] + 1):
                 shelf_id = f'{s}-{u}-{sh}'
                 occupied = all_occupied.get(shelf_id, 0)
                 has_pending = shelf_id in pending_shelves
-                # full=all slots occupied, partial=some occupied or pending, empty=no slots
-                if occupied >= SLOTS_PER_SHELF:
+                if occupied >= cfg['slots_per_shelf']:
                     status = 'full'
                 elif has_pending or occupied > 0:
                     status = 'partial'
@@ -441,13 +486,49 @@ def warehouse_map(request):
                     status = 'empty'
                 shelves[str(sh)] = {
                     'occupied': occupied,
-                    'total': SLOTS_PER_SHELF,
+                    'total': cfg['slots_per_shelf'],
                     'status': status,
                 }
-            units[u] = shelves
-        sectors[str(s)] = units
+            units_data[u] = shelves
+        sectors[str(s)] = units_data
 
-    return JsonResponse({'sectors': sectors})
+    # Include layout data if warehouse has a configured layout
+    layout = None
+    if warehouse and warehouse.layout_configured:
+        cells = WarehouseCell.objects.filter(warehouse=warehouse).order_by('row', 'col')
+        cell_list = []
+        for c in cells:
+            cell_data = {
+                'row': c.row, 'col': c.col, 'cell_type': c.cell_type,
+                'label': c.label, 'sector': c.sector, 'unit': c.unit,
+            }
+            if c.cell_type == 'storage' and c.sector is not None and c.unit:
+                # Aggregate occupancy for this storage cell
+                total_occ = 0
+                total_cap = cfg['shelves_per_unit'] * cfg['slots_per_shelf']
+                for sh in range(1, cfg['shelves_per_unit'] + 1):
+                    sid = f'{c.sector}-{c.unit}-{sh}'
+                    total_occ += all_occupied.get(sid, 0)
+                if total_occ >= total_cap:
+                    cell_data['status'] = 'full'
+                elif total_occ > 0:
+                    cell_data['status'] = 'partial'
+                else:
+                    cell_data['status'] = 'empty'
+                cell_data['occupied'] = total_occ
+                cell_data['total'] = total_cap
+            cell_list.append(cell_data)
+        layout = {
+            'grid_rows': warehouse.grid_rows,
+            'grid_cols': warehouse.grid_cols,
+            'width_m': warehouse.width_m,
+            'length_m': warehouse.length_m,
+            'height_m': warehouse.height_m,
+            'shape': warehouse.shape,
+            'cells': cell_list,
+        }
+
+    return JsonResponse({'sectors': sectors, 'layout': layout})
 
 
 @require_GET
@@ -464,6 +545,7 @@ def delivery_statuses(request):
     all_occupied = {}
     for slot in s_qs.values('shelf_id').annotate(count=Count('id')):
         all_occupied[slot['shelf_id']] = slot['count']
+    cfg = _get_warehouse_config(warehouse)
     result = {}
     for d in deliveries:
         occ = all_occupied.get(d['shelf_id'], 0)
@@ -471,9 +553,9 @@ def delivery_statuses(request):
             'status': d['status'],
             'shelf_id': d['shelf_id'],
             'shelf_occupied': occ,
-            'shelf_full': occ >= SLOTS_PER_SHELF,
+            'shelf_full': occ >= cfg['slots_per_shelf'],
         }
-    total = len(SECTORS) * len(UNITS) * SHELVES_PER_UNIT * SLOTS_PER_SHELF
+    total = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
     occupied = s_qs.count()
     pending_qs = Delivery.objects.filter(status='pending')
     stored_qs = Delivery.objects.filter(status='stored')
@@ -541,7 +623,8 @@ def deleted_deliveries(request):
 def warehouse_stats(request):
     """Return overall warehouse capacity stats."""
     warehouse = _get_current_warehouse(request)
-    total = len(SECTORS) * len(UNITS) * SHELVES_PER_UNIT * SLOTS_PER_SHELF
+    cfg = _get_warehouse_config(warehouse)
+    total = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
     s_qs = ShelfSlot.objects.filter(is_occupied=True)
     p_qs = Delivery.objects.filter(status='pending')
     st_qs = Delivery.objects.filter(status='stored')
@@ -563,6 +646,197 @@ def warehouse_stats(request):
 
 
 # =============================================
+# Warehouse Layout APIs
+# =============================================
+
+@require_GET
+def warehouse_layout(request, warehouse_id):
+    """Return full grid layout for a warehouse."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+    cells = WarehouseCell.objects.filter(warehouse=wh).order_by('row', 'col')
+    cell_list = [
+        {'row': c.row, 'col': c.col, 'cell_type': c.cell_type,
+         'label': c.label, 'sector': c.sector, 'unit': c.unit}
+        for c in cells
+    ]
+    return JsonResponse({
+        'id': wh.id,
+        'name': wh.name,
+        'shape': wh.shape,
+        'width_m': wh.width_m,
+        'length_m': wh.length_m,
+        'height_m': wh.height_m,
+        'grid_rows': wh.grid_rows,
+        'grid_cols': wh.grid_cols,
+        'shelves_per_unit': wh.shelves_per_unit,
+        'slots_per_shelf': wh.slots_per_shelf,
+        'layout_configured': wh.layout_configured,
+        'cells': cell_list,
+    })
+
+
+@require_POST
+def warehouse_layout_save(request, warehouse_id):
+    """Bulk save warehouse layout dimensions and cells."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    # Update warehouse dimensions
+    wh.shape = data.get('shape', wh.shape)
+    wh.width_m = float(data.get('width_m', wh.width_m))
+    wh.length_m = float(data.get('length_m', wh.length_m))
+    wh.height_m = float(data.get('height_m', wh.height_m))
+    wh.grid_rows = int(data.get('grid_rows', wh.grid_rows))
+    wh.grid_cols = int(data.get('grid_cols', wh.grid_cols))
+    wh.shelves_per_unit = int(data.get('shelves_per_unit', wh.shelves_per_unit))
+    wh.slots_per_shelf = int(data.get('slots_per_shelf', wh.slots_per_shelf))
+    wh.layout_configured = True
+    wh.save()
+
+    # Bulk upsert cells
+    cells_data = data.get('cells', [])
+    if cells_data:
+        WarehouseCell.objects.filter(warehouse=wh).delete()
+        objs = [
+            WarehouseCell(
+                warehouse=wh,
+                row=c['row'], col=c['col'],
+                cell_type=c.get('cell_type', 'empty'),
+                label=c.get('label', ''),
+                sector=c.get('sector'),
+                unit=c.get('unit', ''),
+            )
+            for c in cells_data
+        ]
+        WarehouseCell.objects.bulk_create(objs)
+
+    log_event('warehouse', 'info', f'Warehouse layout saved: {wh.name}',
+              f'{wh.grid_rows}x{wh.grid_cols} grid, shape={wh.shape}')
+    return JsonResponse({'success': True, 'id': wh.id})
+
+
+@require_POST
+def warehouse_apply_shape(request, warehouse_id):
+    """Preview shape template — returns cell grid without saving."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    shape = data.get('shape', 'rectangle')
+    rows = int(data.get('grid_rows', wh.grid_rows))
+    cols = int(data.get('grid_cols', wh.grid_cols))
+
+    cells = []
+    center_r = (rows - 1) / 2.0
+    center_c = (cols - 1) / 2.0
+    radius_r = rows / 2.0
+    radius_c = cols / 2.0
+
+    for r in range(rows):
+        for c in range(cols):
+            if shape == 'circle':
+                dist = ((r - center_r) / radius_r) ** 2 + ((c - center_c) / radius_c) ** 2
+                cell_type = 'wall' if dist > 1.0 else 'empty'
+            else:
+                cell_type = 'empty'
+            cells.append({'row': r, 'col': c, 'cell_type': cell_type,
+                          'label': '', 'sector': None, 'unit': ''})
+
+    return JsonResponse({'cells': cells, 'grid_rows': rows, 'grid_cols': cols})
+
+
+@require_POST
+def warehouse_toggle_cell(request, warehouse_id):
+    """Toggle a single cell's type."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    row = int(data['row'])
+    col = int(data['col'])
+    cell_type = data.get('cell_type', 'wall')
+
+    cell, created = WarehouseCell.objects.update_or_create(
+        warehouse=wh, row=row, col=col,
+        defaults={'cell_type': cell_type}
+    )
+    return JsonResponse({'row': row, 'col': col, 'cell_type': cell.cell_type})
+
+
+@require_POST
+def warehouse_auto_assign(request, warehouse_id):
+    """Auto-number storage cells as sectors and units."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+
+    cells = list(WarehouseCell.objects.filter(
+        warehouse=wh, cell_type='storage'
+    ).order_by('row', 'col'))
+
+    if not cells:
+        return JsonResponse({'error': 'No storage cells to assign'}, status=400)
+
+    # Simple assignment: each storage cell gets a unique sector-unit pair
+    unit_labels = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+    sector = 1
+    unit_idx = 0
+    for cell in cells:
+        cell.sector = sector
+        cell.unit = unit_labels[unit_idx]
+        cell.label = f'S{sector}-{unit_labels[unit_idx]}'
+        unit_idx += 1
+        if unit_idx >= len(unit_labels):
+            unit_idx = 0
+            sector += 1
+
+    WarehouseCell.objects.bulk_update(cells, ['sector', 'unit', 'label'])
+
+    cell_list = [
+        {'row': c.row, 'col': c.col, 'cell_type': c.cell_type,
+         'label': c.label, 'sector': c.sector, 'unit': c.unit}
+        for c in cells
+    ]
+    return JsonResponse({'success': True, 'cells': cell_list})
+
+
+def warehouse_setup(request, warehouse_id):
+    """Render the warehouse layout setup page."""
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        from django.http import Http404
+        raise Http404
+    warehouse, wh_ctx = _warehouse_context(request)
+    context = {
+        'active_tab': 'settings',
+        'setup_warehouse': wh,
+        **wh_ctx,
+    }
+    return render(request, 'dashboard/warehouse_setup.html', context)
+
+
+# =============================================
 # Page Views
 # =============================================
 
@@ -573,6 +847,7 @@ def index(request):
         p_qs = p_qs.filter(warehouse=warehouse)
     context = {
         'active_tab': 'dashboard',
+        'today': date.today().strftime('%d %B %Y'),
         'stats': {
             'total_materials': Material.objects.count(),
             'pending_deliveries': p_qs.count(),
@@ -630,6 +905,7 @@ def index(request):
 
 def delivery(request):
     warehouse, wh_ctx = _warehouse_context(request)
+    cfg = _get_warehouse_config(warehouse)
     d_qs = Delivery.objects.select_related('material').exclude(status='deleted')
     if warehouse:
         d_qs = d_qs.filter(warehouse=warehouse)
@@ -658,12 +934,12 @@ def delivery(request):
             'pallets_stored': pallets_stored,
             'pallets_needed': pallets_needed,
             'shelf_occupied': shelf_occupied,
-            'shelf_full': shelf_occupied >= SLOTS_PER_SHELF,
+            'shelf_full': shelf_occupied >= cfg['slots_per_shelf'],
             'material_id': d.material.id if d.material else None,
             'material_name': d.material.name if d.material else '',
         })
 
-    total_slots = len(SECTORS) * len(UNITS) * SHELVES_PER_UNIT * SLOTS_PER_SHELF
+    total_slots = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
     occ_qs = ShelfSlot.objects.filter(is_occupied=True, delivery__isnull=False)
     pend_qs = Delivery.objects.filter(status='pending')
     stor_qs = Delivery.objects.filter(status='stored')
@@ -675,7 +951,7 @@ def delivery(request):
 
     context = {
         'active_tab': 'delivery',
-        'slots_per_shelf': SLOTS_PER_SHELF,
+        'slots_per_shelf': cfg['slots_per_shelf'],
         'deliveries': delivery_list,
         'total_slots': total_slots,
         'occupied_slots': occupied_slots,
@@ -1545,24 +1821,32 @@ def logs(request):
         qs = qs.filter(timestamp__date__gte=date_from)
     if date_to:
         qs = qs.filter(timestamp__date__lte=date_to)
-    if order_id:
-        qs = qs.filter(
-            models.Q(manufacturing_order__order_id=order_id) |
-            models.Q(title__icontains=order_id)
-        )
-    if around:
-        try:
-            center = datetime.datetime.fromisoformat(around)
-            qs = qs.filter(
-                timestamp__gte=center - datetime.timedelta(minutes=30),
-                timestamp__lte=center + datetime.timedelta(minutes=30),
-            )
-        except (ValueError, TypeError):
-            pass
+    # When order_id is provided via chart click-through, do NOT filter —
+    # show all logs so the user sees context before/after. We'll mark which
+    # log entry to scroll to via highlight_log_id.
+    highlight_log_id = None
+    if not order_id:
+        if around:
+            try:
+                center = datetime.datetime.fromisoformat(around)
+                qs = qs.filter(
+                    timestamp__gte=center - datetime.timedelta(hours=2),
+                    timestamp__lte=center + datetime.timedelta(hours=2),
+                )
+            except (ValueError, TypeError):
+                pass
 
     logs_list = qs.select_related(
         'delivery', 'manufacturing_order', 'machine', 'scrap_event'
-    )[:200]
+    )[:500]
+
+    # Find the first log entry that matches the target order so we can scroll to it
+    if order_id:
+        for log in logs_list:
+            if (log.manufacturing_order and log.manufacturing_order.order_id == order_id) or \
+               order_id in log.title:
+                highlight_log_id = log.id
+                break
 
     context = {
         'active_tab': 'logs',
@@ -1575,6 +1859,7 @@ def logs(request):
         'filter_date_from': date_from,
         'filter_date_to': date_to,
         'filter_order': order_id,
+        'highlight_log_id': highlight_log_id,
     }
     return render(request, 'dashboard/logs.html', context)
 
@@ -1647,3 +1932,624 @@ def warehouse_list(request):
     warehouses = list(Warehouse.objects.values('id', 'name', 'code', 'num_docks'))
     current = _get_current_warehouse(request)
     return JsonResponse({'warehouses': warehouses, 'current_id': current.id if current else None})
+
+
+# =============================================
+# Settings Page
+# =============================================
+
+def settings_page(request):
+    ai = AISettings.get()
+    context = {
+        'active_tab': 'settings',
+        'ai_settings': ai,
+        'has_credentials': bool(ai.gcp_project_id and ai.service_account_json),
+    }
+    return render(request, 'dashboard/settings.html', context)
+
+
+from django.views.decorators.csrf import csrf_exempt as _csrf_exempt
+
+@_csrf_exempt
+@require_POST
+def save_ai_settings(request):
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    ai = AISettings.get()
+    ai.gcp_project_id = body.get('gcp_project_id', '').strip()
+
+    svc_json = body.get('service_account_json', '').strip()
+    if svc_json:
+        try:
+            parsed = json.loads(svc_json)
+        except json.JSONDecodeError:
+            return JsonResponse({'error': 'Invalid JSON in service account key'}, status=400)
+        ai.service_account_json = svc_json
+        # Auto-fill project_id from JSON if user left it empty
+        if not ai.gcp_project_id and parsed.get('project_id'):
+            ai.gcp_project_id = parsed['project_id']
+
+    ai.save()
+    return JsonResponse({'ok': True})
+
+
+# =============================================
+# Profile Selection & Operator Views
+# =============================================
+
+def profile_select(request):
+    role = request.session.get('selected_role')
+    if role == 'warehouse_operator':
+        return redirect('dashboard:operator_home')
+    elif role == 'maintenance_tech':
+        return redirect('dashboard:maintenance_home')
+    return render(request, 'dashboard/profile_select.html')
+
+
+@require_POST
+def set_profile(request):
+    role = request.POST.get('role', '')
+    if role in ('warehouse_operator', 'maintenance_tech', 'production_supervisor'):
+        request.session['selected_role'] = role
+        if role == 'warehouse_operator':
+            return redirect('dashboard:operator_home')
+        elif role == 'maintenance_tech':
+            return redirect('dashboard:maintenance_home')
+    return redirect('dashboard:profile_select')
+
+
+def clear_profile(request):
+    request.session.pop('selected_role', None)
+    return redirect('dashboard:profile_select')
+
+
+def _require_operator(request):
+    if request.session.get('selected_role') != 'warehouse_operator':
+        return redirect('dashboard:profile_select')
+    return None
+
+
+def operator_home(request):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    warehouse = _get_current_warehouse(request)
+    return render(request, 'dashboard/operator/home.html', {
+        'active_tab': 'home',
+        'role': 'warehouse_operator',
+        'current_warehouse': warehouse,
+    })
+
+
+def operator_dashboard(request):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    warehouse, wh_ctx = _warehouse_context(request)
+    today = date.today()
+    pending = Delivery.objects.filter(status='pending')
+    stored_today = Delivery.objects.filter(status='stored')
+    arriving = Delivery.objects.filter(date=today)
+    if warehouse:
+        pending = pending.filter(warehouse=warehouse)
+        stored_today = stored_today.filter(warehouse=warehouse)
+        arriving = arriving.filter(warehouse=warehouse)
+
+    recent_logs = GlobalLog.objects.filter(
+        event_type__in=['delivery', 'warehouse', 'shipment']
+    ).order_by('-timestamp')[:5]
+
+    context = {
+        'active_tab': 'dashboard',
+        'active_sub': 'dashboard',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'stats': {
+            'pending_deliveries': pending.count(),
+            'storage_utilization': _overall_utilization(warehouse),
+            'total_materials': Material.objects.count(),
+            'arriving_today': arriving.count(),
+        },
+        'recent_logs': recent_logs,
+        **wh_ctx,
+    }
+    return render(request, 'dashboard/operator/dashboard.html', context)
+
+
+def operator_delivery(request):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    warehouse, wh_ctx = _warehouse_context(request)
+    cfg = _get_warehouse_config(warehouse)
+    d_qs = Delivery.objects.select_related('material').exclude(status='deleted')
+    if warehouse:
+        d_qs = d_qs.filter(warehouse=warehouse)
+    delivery_list = []
+    for d in d_qs:
+        slot_qs = ShelfSlot.objects.filter(delivery=d, is_occupied=True)
+        pallets_stored = slot_qs.count()
+        try:
+            pallets_needed = int(''.join(c for c in d.quantity if c.isdigit()))
+        except (ValueError, IndexError):
+            pallets_needed = 1
+        shelf_occ_qs = ShelfSlot.objects.filter(shelf_id=d.shelf_id, is_occupied=True)
+        if warehouse:
+            shelf_occ_qs = shelf_occ_qs.filter(warehouse=warehouse)
+        shelf_occupied = shelf_occ_qs.count()
+        delivery_list.append({
+            'id': d.id,
+            'manufacturer': d.manufacturer,
+            'date': str(d.date),
+            'created_at': d.created_at.strftime('%b %d, %I:%M %p') if d.created_at else str(d.date),
+            'size': d.size,
+            'batch_id': d.batch_id,
+            'quantity': d.quantity,
+            'shelf_id': d.shelf_id,
+            'status': d.status,
+            'pallets_stored': pallets_stored,
+            'pallets_needed': pallets_needed,
+            'shelf_occupied': shelf_occupied,
+            'shelf_full': shelf_occupied >= cfg['slots_per_shelf'],
+            'material_id': d.material.id if d.material else None,
+            'material_name': d.material.name if d.material else '',
+        })
+
+    total_slots = len(cfg['sectors']) * len(cfg['units']) * cfg['shelves_per_unit'] * cfg['slots_per_shelf']
+    occ_qs = ShelfSlot.objects.filter(is_occupied=True, delivery__isnull=False)
+    pend_qs = Delivery.objects.filter(status='pending')
+    stor_qs = Delivery.objects.filter(status='stored')
+    if warehouse:
+        occ_qs = occ_qs.filter(warehouse=warehouse)
+        pend_qs = pend_qs.filter(warehouse=warehouse)
+        stor_qs = stor_qs.filter(warehouse=warehouse)
+    occupied_slots = occ_qs.count()
+
+    context = {
+        'active_tab': 'delivery',
+        'active_sub': 'delivery',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'slots_per_shelf': cfg['slots_per_shelf'],
+        'deliveries': delivery_list,
+        'total_slots': total_slots,
+        'occupied_slots': occupied_slots,
+        'available_slots': total_slots - occupied_slots,
+        'pending_count': pend_qs.count(),
+        'stored_count': stor_qs.count(),
+        **wh_ctx,
+    }
+    return render(request, 'dashboard/operator/delivery.html', context)
+
+
+def operator_materials(request):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    warehouse, wh_ctx = _warehouse_context(request)
+    mats = Material.objects.all().order_by('id')
+    materials_list = []
+    for m in mats:
+        d_qs = m.delivery_set.all()
+        if warehouse:
+            d_qs = d_qs.filter(warehouse=warehouse)
+        total_qty = 0
+        for d in d_qs:
+            try:
+                total_qty += int(''.join(c for c in d.quantity if c.isdigit()))
+            except (ValueError, IndexError):
+                pass
+        loc_qs = Delivery.objects.filter(material=m, status__in=['pending', 'stored'])
+        if warehouse:
+            loc_qs = loc_qs.filter(warehouse=warehouse)
+        shelf_ids = list(loc_qs.values_list('shelf_id', flat=True))
+        sector_units = set()
+        for sid in shelf_ids:
+            p = sid.split('-')
+            if len(p) == 3:
+                sector_units.add(f'{p[0]}-{p[1]}')
+        delivery_count = d_qs.count()
+        if delivery_count == 0 and total_qty == 0:
+            continue
+        materials_list.append({
+            'id': m.id,
+            'name': m.name,
+            'category': m.category,
+            'delivery_count': delivery_count,
+            'total_quantity': str(total_qty) if total_qty > 0 else '\u2014',
+            'sector_units': sorted(sector_units),
+            'locations': sorted(set(shelf_ids)),
+        })
+    context = {
+        'active_tab': 'materials',
+        'active_sub': 'materials',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'materials': materials_list,
+        **wh_ctx,
+    }
+    return render(request, 'dashboard/operator/materials.html', context)
+
+
+def operator_warehouse(request):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    warehouse = _get_current_warehouse(request)
+    warehouses = Warehouse.objects.all().order_by('id')
+    context = {
+        'active_tab': 'warehouse',
+        'active_sub': 'warehouse',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'warehouses': warehouses,
+        'current_warehouse': warehouse,
+    }
+    return render(request, 'dashboard/operator/warehouse.html', context)
+
+
+def operator_warehouse_view(request, warehouse_id):
+    redir = _require_operator(request)
+    if redir:
+        return redir
+    wh = Warehouse.objects.filter(id=warehouse_id).first()
+    if not wh:
+        from django.http import Http404
+        raise Http404("Warehouse not found")
+
+    cells = WarehouseCell.objects.filter(warehouse=wh).order_by('row', 'col')
+    storage_cells = cells.filter(cell_type='storage')
+
+    # Gather unit info with occupancy
+    units = {}
+    for cell in storage_cells:
+        key = f"{cell.sector}-{cell.unit}"
+        if key not in units:
+            units[key] = {
+                'sector': cell.sector,
+                'unit': cell.unit,
+                'label': cell.label or key,
+                'shelves': [],
+                'total_slots': 0,
+                'occupied_slots': 0,
+            }
+
+    # Get shelf slot data per unit
+    slots = ShelfSlot.objects.filter(warehouse=wh)
+    shelf_map = {}
+    for slot in slots:
+        parts = slot.shelf_id.split('-')
+        if len(parts) >= 3:
+            unit_key = f"{parts[0]}-{parts[1]}"
+            shelf_num = parts[2]
+            if unit_key not in shelf_map:
+                shelf_map[unit_key] = {}
+            if shelf_num not in shelf_map[unit_key]:
+                shelf_map[unit_key][shelf_num] = {'total': 0, 'occupied': 0}
+            shelf_map[unit_key][shelf_num]['total'] += 1
+            if slot.is_occupied:
+                shelf_map[unit_key][shelf_num]['occupied'] += 1
+
+    for unit_key, shelf_data in shelf_map.items():
+        if unit_key in units:
+            for shelf_num, counts in sorted(shelf_data.items(), key=lambda x: int(x[0])):
+                units[unit_key]['shelves'].append({
+                    'shelf_id': f"{unit_key}-{shelf_num}",
+                    'shelf_num': shelf_num,
+                    'total': counts['total'],
+                    'occupied': counts['occupied'],
+                    'free': counts['total'] - counts['occupied'],
+                    'pct': round(counts['occupied'] / counts['total'] * 100) if counts['total'] > 0 else 0,
+                })
+                units[unit_key]['total_slots'] += counts['total']
+                units[unit_key]['occupied_slots'] += counts['occupied']
+
+    # Sort units by sector then unit letter
+    unit_list = sorted(units.values(), key=lambda u: (u['sector'] or 0, u['unit'] or ''))
+
+    total_slots = sum(u['total_slots'] for u in unit_list)
+    occupied_slots = sum(u['occupied_slots'] for u in unit_list)
+
+    # Build occupancy lookup per unit key
+    unit_occupancy = {}
+    for unit_key, data in units.items():
+        t = data['total_slots']
+        o = data['occupied_slots']
+        if t == 0:
+            status = 'empty'
+        elif o >= t:
+            status = 'full'
+        elif o > 0:
+            status = 'partial'
+        else:
+            status = 'empty'
+        unit_occupancy[unit_key] = {'occupied': o, 'total': t, 'status': status}
+
+    # Grid data for map (with occupancy)
+    cell_list = []
+    for cell in cells:
+        c = {
+            'row': cell.row,
+            'col': cell.col,
+            'cell_type': cell.cell_type,
+            'label': cell.label,
+            'sector': cell.sector,
+            'unit': cell.unit,
+        }
+        if cell.cell_type == 'storage' and cell.sector is not None and cell.unit:
+            ukey = f"{cell.sector}-{cell.unit}"
+            occ = unit_occupancy.get(ukey, {'occupied': 0, 'total': 0, 'status': 'empty'})
+            c['occupied'] = occ['occupied']
+            c['total'] = occ['total']
+            c['status'] = occ['status']
+        cell_list.append(c)
+
+    current_warehouse = _get_current_warehouse(request)
+
+    context = {
+        'active_tab': 'warehouse',
+        'active_sub': 'warehouse',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'warehouse': wh,
+        'current_warehouse': current_warehouse,
+        'units': unit_list,
+        'total_slots': total_slots,
+        'occupied_slots': occupied_slots,
+        'free_slots': total_slots - occupied_slots,
+        'occupancy_pct': round(occupied_slots / total_slots * 100) if total_slots > 0 else 0,
+        'storage_count': storage_cells.count(),
+        'cells_json': json.dumps(cell_list),
+    }
+    return render(request, 'dashboard/operator/warehouse_view.html', context)
+
+
+# =============================================
+# Maintenance Technician Views
+# =============================================
+
+def _compute_health(usage, threshold):
+    if threshold <= 0:
+        return 0.0
+    ratio = usage / threshold
+    fail_prob = 1 - math.exp(-((ratio) ** 3.5))
+    return round(max(0, (1 - fail_prob)) * 100, 1)
+
+
+def _require_maintenance(request):
+    if request.session.get('selected_role') != 'maintenance_tech':
+        return redirect('dashboard:profile_select')
+    return None
+
+
+def maintenance_home(request):
+    redir = _require_maintenance(request)
+    if redir:
+        return redir
+    return render(request, 'dashboard/maintenance/home.html', {
+        'active_tab': 'home',
+        'role': 'maintenance_tech',
+    })
+
+
+def maintenance_dashboard(request):
+    redir = _require_maintenance(request)
+    if redir:
+        return redir
+    today = date.today()
+    machines = MachineHealth.objects.all()
+    machines_data = []
+    total_health = 0
+    needs_attention = 0
+    for m in machines:
+        h = _compute_health(m.usage_count, m.failure_threshold)
+        total_health += h
+        if h < 50:
+            needs_attention += 1
+        machines_data.append({
+            'machine_id': m.machine_id,
+            'machine_name': m.machine_name,
+            'health_pct': h,
+        })
+    avg_health = round(total_health / max(len(machines_data), 1), 1)
+    defected_today = ManufacturingOrder.objects.filter(status='defected', created_at__date=today).count()
+    scrap_today = ScrapEvent.objects.filter(created_at__date=today).count()
+    recent_logs = GlobalLog.objects.filter(
+        event_type__in=['machine', 'scrap', 'threshold', 'manufacturing']
+    ).order_by('-timestamp')[:10]
+    recent_maintenance = MaintenanceEntry.objects.select_related('machine').all()[:5]
+    context = {
+        'active_tab': 'dashboard',
+        'active_sub': 'dashboard',
+        'role': 'maintenance_tech',
+        'mode': 'ui',
+        'today': today.strftime('%A, %B %-d, %Y'),
+        'stats': {
+            'needs_attention': needs_attention,
+            'avg_health': avg_health,
+            'defected_today': defected_today,
+            'scrap_today': scrap_today,
+        },
+        'recent_logs': recent_logs,
+        'recent_maintenance': recent_maintenance,
+    }
+    return render(request, 'dashboard/maintenance/dashboard.html', context)
+
+
+def maintenance_machines(request):
+    redir = _require_maintenance(request)
+    if redir:
+        return redir
+    machines = MachineHealth.objects.all()
+    machines_list = []
+    for m in machines:
+        h = _compute_health(m.usage_count, m.failure_threshold)
+        if h > 70:
+            status = 'healthy'
+        elif h > 40:
+            status = 'warning'
+        elif h > 20:
+            status = 'maintenance'
+        else:
+            status = 'critical'
+        recent_entries = MaintenanceEntry.objects.filter(machine=m).order_by('-date')[:5]
+        recent_defects = ManufacturingOrder.objects.filter(
+            defect_machine_id=m.machine_id, status='defected'
+        ).count()
+        recent_scrap = ScrapEvent.objects.filter(machine_id=m.machine_id).count()
+        machines_list.append({
+            'id': m.id,
+            'machine_id': m.machine_id,
+            'machine_name': m.machine_name,
+            'health_pct': h,
+            'usage_count': m.usage_count,
+            'failure_threshold': m.failure_threshold,
+            'last_maintenance': m.last_maintenance,
+            'status': status,
+            'detail_data': m.detail_data or {},
+            'maintenance_entries': recent_entries,
+            'defect_count': recent_defects,
+            'scrap_count': recent_scrap,
+        })
+    context = {
+        'active_tab': 'machines',
+        'active_sub': 'machines',
+        'role': 'maintenance_tech',
+        'mode': 'ui',
+        'machines': machines_list,
+    }
+    return render(request, 'dashboard/maintenance/machines.html', context)
+
+
+def maintenance_log_page(request):
+    redir = _require_maintenance(request)
+    if redir:
+        return redir
+    entries = MaintenanceEntry.objects.select_related('machine').all()
+    # Apply filters
+    machine_id = request.GET.get('machine')
+    mtype = request.GET.get('type')
+    date_from = request.GET.get('date_from')
+    date_to = request.GET.get('date_to')
+    if machine_id:
+        entries = entries.filter(machine__machine_id=machine_id)
+    if mtype:
+        entries = entries.filter(maintenance_type=mtype)
+    if date_from:
+        entries = entries.filter(date__gte=date_from)
+    if date_to:
+        entries = entries.filter(date__lte=date_to)
+    machines = MachineHealth.objects.all().order_by('machine_name')
+    context = {
+        'active_tab': 'maintenance_log',
+        'active_sub': 'maintenance_log',
+        'role': 'maintenance_tech',
+        'mode': 'ui',
+        'entries': entries[:100],
+        'machines': machines,
+        'filter_machine': machine_id or '',
+        'filter_type': mtype or '',
+        'filter_date_from': date_from or '',
+        'filter_date_to': date_to or '',
+    }
+    return render(request, 'dashboard/maintenance/maintenance_log.html', context)
+
+
+def maintenance_logs(request):
+    redir = _require_maintenance(request)
+    if redir:
+        return redir
+    logs = GlobalLog.objects.filter(
+        event_type__in=['machine', 'scrap', 'manufacturing', 'threshold']
+    )
+    event_type = request.GET.get('event_type')
+    severity = request.GET.get('severity')
+    search = request.GET.get('search')
+    date_from = request.GET.get('date_from')
+    date_to = request.GET.get('date_to')
+    if event_type:
+        logs = logs.filter(event_type=event_type)
+    if severity:
+        logs = logs.filter(severity=severity)
+    if search:
+        from django.db.models import Q
+        logs = logs.filter(Q(title__icontains=search) | Q(description__icontains=search))
+    if date_from:
+        logs = logs.filter(timestamp__date__gte=date_from)
+    if date_to:
+        logs = logs.filter(timestamp__date__lte=date_to)
+    context = {
+        'active_tab': 'logs',
+        'active_sub': 'logs',
+        'role': 'maintenance_tech',
+        'mode': 'ui',
+        'logs': logs[:100],
+        'filter_event_type': event_type or '',
+        'filter_severity': severity or '',
+        'filter_search': search or '',
+        'filter_date_from': date_from or '',
+        'filter_date_to': date_to or '',
+    }
+    return render(request, 'dashboard/maintenance/logs.html', context)
+
+
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+@require_POST
+def api_create_maintenance_entry(request):
+    try:
+        body = json.loads(request.body)
+    except (json.JSONDecodeError, ValueError):
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+    machine_id = body.get('machine_id', '').strip()
+    maintenance_type = body.get('maintenance_type', '').strip()
+    description = body.get('description', '').strip()
+    entry_date = body.get('date', '')
+    parts_replaced = body.get('parts_replaced', '').strip()
+    technician_notes = body.get('technician_notes', '').strip()
+    next_scheduled = body.get('next_scheduled', '')
+    if not machine_id or not maintenance_type or not description:
+        return JsonResponse({'error': 'machine_id, maintenance_type, and description are required'}, status=400)
+    try:
+        machine = MachineHealth.objects.get(machine_id=machine_id)
+    except MachineHealth.DoesNotExist:
+        return JsonResponse({'error': f'Machine {machine_id} not found'}, status=404)
+    if not entry_date:
+        entry_date = date.today()
+    entry = MaintenanceEntry.objects.create(
+        machine=machine,
+        date=entry_date,
+        maintenance_type=maintenance_type,
+        description=description,
+        parts_replaced=parts_replaced,
+        technician_notes=technician_notes,
+        next_scheduled=next_scheduled or None,
+    )
+    # Update machine last_maintenance
+    machine.last_maintenance = timezone.now()
+    machine.save(update_fields=['last_maintenance'])
+    # Log event
+    log_event(
+        'machine', 'info',
+        f'Maintenance logged: {maintenance_type} on {machine.machine_name}',
+        description=description,
+        machine=machine,
+    )
+    return JsonResponse({
+        'ok': True,
+        'entry': {
+            'id': entry.id,
+            'machine_name': machine.machine_name,
+            'machine_id': machine.machine_id,
+            'date': str(entry.date),
+            'maintenance_type': entry.maintenance_type,
+            'description': entry.description,
+            'parts_replaced': entry.parts_replaced,
+            'technician_notes': entry.technician_notes,
+            'next_scheduled': str(entry.next_scheduled) if entry.next_scheduled else None,
+        },
+    })

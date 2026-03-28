@@ -59,7 +59,7 @@
         </div>
         <div class="delivery-stat-content">
             <span class="delivery-stat-value" data-count="{{ pending_count }}">{{ pending_count }}</span>
-            <span class="delivery-stat-label">To Be Stored</span>
+            <span class="delivery-stat-label">Unstocked Palets</span>
         </div>
     </div>
     <div class="delivery-stat-arrow">
@@ -206,7 +206,7 @@
             <tr>
                 <th style="width:32px;"><input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)"></th>
                 <th>Delivery #</th>
-                <th>Manufacturer</th>
+                <th>Vendors</th>
                 <th>Date & Time</th>
                 <th>Size</th>
                 <th>Batch ID</th>
@@ -266,19 +266,18 @@
                 <label class="map-start-label">Start from:</label>
                 <select id="mapStartSector" class="map-start-select">
                     <option value="">Auto</option>
-                    <option value="1">Sector 1</option>
-                    <option value="2">Sector 2</option>
-                    <option value="3">Sector 3</option>
-                    <option value="4">Sector 4</option>
-                    <option value="5">Sector 5</option>
-                    <option value="6">Sector 6</option>
-                    <option value="7">Sector 7</option>
                 </select>
                 <button class="btn-toolbar-action btn-optimize" onclick="calcOptimalRoute()">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
                     Optimize
                 </button>
             </div>
+            {% if current_warehouse %}
+            <a href="{% url 'dashboard:warehouse_setup' current_warehouse.id %}" class="btn-toolbar-action" style="text-decoration:none;font-size:0.75rem" title="Configure warehouse layout">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></svg>
+                Configure
+            </a>
+            {% endif %}
             <button class="shelf-modal-close" onclick="closeWarehouseMap()" aria-label="Close">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
@@ -1062,6 +1061,7 @@ function closeWarehouseMap() {
 }
 
 var cachedMapSectors = null;
+var cachedMapLayout = null;
 
 function loadMapData() {
     var grid = document.getElementById('mapGrid');
@@ -1071,33 +1071,92 @@ function loadMapData() {
         .then(function(r) { return r.json(); })
         .then(function(data) {
             cachedMapSectors = data.sectors;
-            renderMap(data.sectors);
+            cachedMapLayout = data.layout;
+            // Populate sector dropdown dynamically
+            var sel = document.getElementById('mapStartSector');
+            if (sel) {
+                sel.innerHTML = '<option value="">Auto</option>';
+                var sKeys = Object.keys(data.sectors).sort(function(a,b){ return parseInt(a)-parseInt(b); });
+                sKeys.forEach(function(s) {
+                    sel.innerHTML += '<option value="' + s + '">Sector ' + s + '</option>';
+                });
+            }
+            if (data.layout && data.layout.cells && data.layout.cells.length > 0) {
+                renderDynamicMap(data.layout);
+            } else {
+                renderMap(data.sectors);
+            }
         })
         .catch(function() {
             grid.innerHTML = '<div class="map-loading">Failed to load map data</div>';
         });
 }
 
+function renderDynamicMap(layout) {
+    var grid = document.getElementById('mapGrid');
+    var gridRows = layout.grid_rows;
+    var gridCols = layout.grid_cols;
+    var cells = layout.cells;
+
+    // Build a lookup map
+    var cellMap = {};
+    cells.forEach(function(c) { cellMap[c.row + ',' + c.col] = c; });
+
+    var html = '<div class="dynamic-map-grid" style="grid-template-columns:repeat(' + gridCols + ',1fr)">';
+    html += '<div class="dynamic-map-dims">' + layout.width_m + 'm x ' + layout.length_m + 'm, ' + layout.height_m + 'm tall</div>';
+
+    for (var r = 0; r < gridRows; r++) {
+        for (var c = 0; c < gridCols; c++) {
+            var cell = cellMap[r + ',' + c] || { cell_type: 'empty' };
+            var cls = 'dmap-cell dmap-' + cell.cell_type;
+            var attrs = '';
+            var inner = '';
+
+            if (cell.cell_type === 'storage' && cell.sector != null && cell.unit) {
+                var statusCls = cell.status ? ' dmap-occ-' + cell.status : '';
+                cls += statusCls;
+                var shelfId = cell.sector + '-' + cell.unit + '-1';
+                attrs = ' onclick="closeWarehouseMap(); Shelf3D.open(\'' + shelfId + '\')" title="' + cell.label + ': ' + (cell.occupied||0) + '/' + (cell.total||0) + '"';
+                inner = '<span class="dmap-label">' + (cell.label || '') + '</span>';
+            } else if (cell.cell_type === 'wall') {
+                attrs = ' title="Wall"';
+            } else if (cell.cell_type === 'dock') {
+                inner = '<span class="dmap-label">D</span>';
+                attrs = ' title="Loading Dock"';
+            }
+
+            html += '<div class="' + cls + '"' + attrs + '>' + inner + '</div>';
+        }
+    }
+
+    html += '</div>';
+    grid.innerHTML = html;
+}
+
 function renderMap(sectors) {
     var grid = document.getElementById('mapGrid');
     var html = '';
-    var units = ['A', 'B', 'C', 'D'];
+    var sectorKeys = Object.keys(sectors).sort(function(a,b){ return parseInt(a) - parseInt(b); });
 
-    for (var s = 1; s <= 7; s++) {
-        var sectorData = sectors[String(s)];
+    for (var si = 0; si < sectorKeys.length; si++) {
+        var s = sectorKeys[si];
+        var sectorData = sectors[s];
+        var unitKeys = Object.keys(sectorData).sort();
         html += '<div class="map-sector">';
         html += '<div class="map-sector-label">Sector ' + s + '</div>';
         html += '<div class="map-sector-units">';
 
-        for (var ui = 0; ui < units.length; ui++) {
-            var u = units[ui];
+        for (var ui = 0; ui < unitKeys.length; ui++) {
+            var u = unitKeys[ui];
             var unitData = sectorData[u];
+            var shelfKeys = Object.keys(unitData).sort(function(a,b){ return parseInt(a) - parseInt(b); });
             html += '<div class="map-unit">';
             html += '<div class="map-unit-label">Unit ' + u + '</div>';
             html += '<div class="map-shelves">';
 
-            for (var sh = 1; sh <= 6; sh++) {
-                var shelf = unitData[String(sh)];
+            for (var shi = 0; shi < shelfKeys.length; shi++) {
+                var sh = shelfKeys[shi];
+                var shelf = unitData[sh];
                 var statusClass = 'map-shelf-' + shelf.status;
                 var tooltip = s + '-' + u + '-' + sh + ': ' + shelf.occupied + '/' + shelf.total;
                 html += '<div class="map-shelf ' + statusClass + '" title="' + tooltip + '" onclick="closeWarehouseMap(); Shelf3D.open(\'' + s + '-' + u + '-' + sh + '\')">';
@@ -1128,22 +1187,26 @@ function calcOptimalRoute() {
     window._mapStartSector = startSector;
     localStorage.setItem('mapStartSector', String(startSector));
 
-    var units = ['A', 'B', 'C', 'D'];
+    var sectorKeys = Object.keys(cachedMapSectors).sort(function(a,b){ return parseInt(a)-parseInt(b); });
     var targets = [];
 
     // Collect all shelves needing stocking (partial status) with occupancy info
-    for (var s = 1; s <= 7; s++) {
-        var sectorData = cachedMapSectors[String(s)];
+    for (var si = 0; si < sectorKeys.length; si++) {
+        var s = sectorKeys[si];
+        var sectorData = cachedMapSectors[s];
         if (!sectorData) continue;
-        for (var ui = 0; ui < units.length; ui++) {
-            var u = units[ui];
+        var unitKeys = Object.keys(sectorData).sort();
+        for (var ui = 0; ui < unitKeys.length; ui++) {
+            var u = unitKeys[ui];
             var unitData = sectorData[u];
             if (!unitData) continue;
-            for (var sh = 1; sh <= 6; sh++) {
-                var shelf = unitData[String(sh)];
+            var shelfKeys = Object.keys(unitData).sort(function(a,b){ return parseInt(a)-parseInt(b); });
+            for (var shi = 0; shi < shelfKeys.length; shi++) {
+                var sh = shelfKeys[shi];
+                var shelf = unitData[sh];
                 if (shelf && shelf.status === 'partial') {
                     targets.push({
-                        sector: s, unit: u, unitIdx: ui, shelf: sh,
+                        sector: parseInt(s), unit: u, unitIdx: ui, shelf: parseInt(sh),
                         shelfId: s + '-' + u + '-' + sh,
                         occupied: shelf.occupied,
                         free: shelf.total - shelf.occupied
@@ -1179,7 +1242,7 @@ function calcOptimalRoute() {
     });
 
     // Find min and max sectors that have targets
-    var minSector = 7, maxSector = 1;
+    var minSector = Infinity, maxSector = -Infinity;
     allGroups.forEach(function(g) {
         if (g.sector < minSector) minSector = g.sector;
         if (g.sector > maxSector) maxSector = g.sector;

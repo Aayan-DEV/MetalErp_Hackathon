@@ -50,24 +50,23 @@
                     </div>
                 </div>
             </div>
-            {% if filter_order %}
-            <input type="hidden" name="order" value="{{ filter_order }}">
-            {% endif %}
         </form>
     </div>
 
     {% if filter_order %}
     <div class="log-context-banner mt-4">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
-        <span>Showing logs related to order <strong>{{ filter_order }}</strong></span>
-        <a href="{% url 'dashboard:logs' %}" style="margin-left:auto;font-size:0.78rem;opacity:0.7;">Clear filter</a>
+        <span>Scrolled to logs for order <strong>{{ filter_order }}</strong> — scroll up and down to see surrounding events</span>
+        <a href="{% url 'dashboard:logs' %}" style="margin-left:auto;font-size:0.78rem;opacity:0.7;">Clear</a>
     </div>
     {% endif %}
 
     <!-- Log Timeline -->
     <div class="log-timeline mt-6">
         {% for log in logs %}
-        <div class="log-entry log-severity-{{ log.severity }}">
+        <div class="log-entry log-severity-{{ log.severity }}{% if log.id == highlight_log_id %} log-highlight-target{% endif %}"
+             id="log-{{ log.id }}"
+             {% if log.id == highlight_log_id %}data-highlight="true"{% endif %}>
             <div class="log-entry-dot"></div>
             <div class="log-entry-content">
                 <div class="log-entry-header">
@@ -101,4 +100,25 @@
         {% endfor %}
     </div>
 </div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function() {
+    var target = document.querySelector('[data-highlight="true"]');
+    if (!target) return;
+
+    // Scroll to the highlighted entry with offset so it's centered
+    setTimeout(function() {
+        var rect = target.getBoundingClientRect();
+        var offset = window.pageYOffset + rect.top - (window.innerHeight / 3);
+        window.scrollTo({ top: offset, behavior: 'smooth' });
+    }, 150);
+
+    // Pulse animation — add class after scroll, remove after animation
+    setTimeout(function() {
+        target.classList.add('log-highlight-pulse');
+    }, 600);
+})();
+</script>
 {% endblock %}

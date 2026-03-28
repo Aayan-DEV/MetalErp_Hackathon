@@ -2,9 +2,21 @@ from django.db import models
 
 
 class Warehouse(models.Model):
+    SHAPE_CHOICES = [('rectangle', 'Rectangle'), ('circle', 'Circle'), ('custom', 'Custom')]
+
     name = models.CharField(max_length=200, unique=True)
     code = models.CharField(max_length=20, unique=True)
     num_docks = models.IntegerField(default=3)
+    # Layout configuration
+    shape = models.CharField(max_length=20, choices=SHAPE_CHOICES, default='rectangle')
+    width_m = models.FloatField(default=50.0)
+    length_m = models.FloatField(default=50.0)
+    height_m = models.FloatField(default=10.0)
+    grid_cols = models.IntegerField(default=10)
+    grid_rows = models.IntegerField(default=10)
+    shelves_per_unit = models.IntegerField(default=6)
+    slots_per_shelf = models.IntegerField(default=4)
+    layout_configured = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -129,6 +141,30 @@ class ShelfSlot(models.Model):
         return f'{self.shelf_id} slot {self.slot_index} ({status})'
 
 
+class WarehouseCell(models.Model):
+    CELL_TYPE_CHOICES = [
+        ('storage', 'Storage Unit'),
+        ('wall', 'Wall'),
+        ('walkway', 'Walkway'),
+        ('dock', 'Loading Dock'),
+        ('empty', 'Empty Space'),
+    ]
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='cells')
+    row = models.IntegerField()
+    col = models.IntegerField()
+    cell_type = models.CharField(max_length=20, choices=CELL_TYPE_CHOICES, default='empty')
+    label = models.CharField(max_length=50, blank=True, default='')
+    sector = models.IntegerField(null=True, blank=True)
+    unit = models.CharField(max_length=5, blank=True, default='')
+
+    class Meta:
+        unique_together = ('warehouse', 'row', 'col')
+        ordering = ['row', 'col']
+
+    def __str__(self):
+        return f'({self.row},{self.col}) {self.cell_type}'
+
+
 class GlobalLog(models.Model):
     EVENT_TYPE_CHOICES = [
         ('delivery', 'Delivery'),
@@ -167,3 +203,75 @@ class GlobalLog(models.Model):
 
     def __str__(self):
         return f'[{self.severity.upper()}] {self.title} ({self.timestamp:%Y-%m-%d %H:%M})'
+
+
+class AISettings(models.Model):
+    """Singleton model for AI configuration (Vertex AI credentials)."""
+    gcp_project_id = models.CharField(max_length=200, blank=True, default='')
+    gcp_region = models.CharField(max_length=50, default='us-east5')
+    service_account_json = models.TextField(blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'AI Settings'
+        verbose_name_plural = 'AI Settings'
+
+    def __str__(self):
+        return f'AI Settings (project: {self.gcp_project_id or "not configured"})'
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class MaintenanceEntry(models.Model):
+    MAINTENANCE_TYPE_CHOICES = [
+        ('preventive', 'Preventive'),
+        ('corrective', 'Corrective'),
+        ('inspection', 'Inspection'),
+    ]
+
+    machine = models.ForeignKey(MachineHealth, on_delete=models.CASCADE, related_name='maintenance_entries')
+    date = models.DateField()
+    maintenance_type = models.CharField(max_length=20, choices=MAINTENANCE_TYPE_CHOICES)
+    description = models.TextField()
+    parts_replaced = models.TextField(blank=True, default='')
+    technician_notes = models.TextField(blank=True, default='')
+    next_scheduled = models.DateField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+
+    def __str__(self):
+        return f'{self.machine.machine_name} — {self.maintenance_type} on {self.date}'
+
+
+class ChatConversation(models.Model):
+    session_key = models.CharField(max_length=40, db_index=True)
+    title = models.CharField(max_length=200, default='New Conversation')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f'Chat {self.id} — {self.title}'
+
+
+class ChatMessage(models.Model):
+    ROLE_CHOICES = [('user', 'User'), ('assistant', 'Assistant')]
+
+    conversation = models.ForeignKey(ChatConversation, on_delete=models.CASCADE, related_name='messages')
+    role = models.CharField(max_length=10, choices=ROLE_CHOICES)
+    content = models.TextField()
+    tool_calls = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+
+    def __str__(self):
+        return f'{self.role}: {self.content[:50]}'

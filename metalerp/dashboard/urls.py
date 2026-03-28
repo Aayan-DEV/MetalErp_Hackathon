@@ -1,10 +1,19 @@
 from django.urls import path
-from . import views
+from . import views, ai_views
 
 app_name = 'dashboard'
 
 urlpatterns = [
-    path('', views.index, name='index'),
+    path('', views.profile_select, name='profile_select'),
+    path('set-profile/', views.set_profile, name='set_profile'),
+    path('clear-profile/', views.clear_profile, name='clear_profile'),
+    path('operator/', views.operator_home, name='operator_home'),
+    path('operator/dashboard/', views.operator_dashboard, name='operator_dashboard'),
+    path('operator/delivery/', views.operator_delivery, name='operator_delivery'),
+    path('operator/materials/', views.operator_materials, name='operator_materials'),
+    path('operator/warehouse/', views.operator_warehouse, name='operator_warehouse'),
+    path('operator/warehouse/<int:warehouse_id>/', views.operator_warehouse_view, name='operator_warehouse_view'),
+    path('legacy/', views.index, name='index'),
     path('delivery/', views.delivery, name='delivery'),
     path('manufacturing/', views.manufacturing, name='manufacturing'),
     path('materials/', views.materials, name='materials'),
@@ -34,4 +43,25 @@ urlpatterns = [
     # Warehouse selection
     path('api/warehouses/', views.warehouse_list, name='warehouse_list'),
     path('api/set-warehouse/', views.set_warehouse, name='set_warehouse'),
+    # Warehouse layout
+    path('warehouse/<int:warehouse_id>/setup/', views.warehouse_setup, name='warehouse_setup'),
+    path('api/warehouse-layout/<int:warehouse_id>/', views.warehouse_layout, name='warehouse_layout'),
+    path('api/warehouse-layout/<int:warehouse_id>/save/', views.warehouse_layout_save, name='warehouse_layout_save'),
+    path('api/warehouse-layout/<int:warehouse_id>/apply-shape/', views.warehouse_apply_shape, name='warehouse_apply_shape'),
+    path('api/warehouse-layout/<int:warehouse_id>/toggle-cell/', views.warehouse_toggle_cell, name='warehouse_toggle_cell'),
+    path('api/warehouse-layout/<int:warehouse_id>/auto-assign/', views.warehouse_auto_assign, name='warehouse_auto_assign'),
+    # Settings
+    path('settings/', views.settings_page, name='settings'),
+    path('api/save-ai-settings/', views.save_ai_settings, name='save_ai_settings'),
+    # Maintenance Technician
+    path('maintenance/', views.maintenance_home, name='maintenance_home'),
+    path('maintenance/dashboard/', views.maintenance_dashboard, name='maintenance_dashboard'),
+    path('maintenance/machines/', views.maintenance_machines, name='maintenance_machines'),
+    path('maintenance/log/', views.maintenance_log_page, name='maintenance_log'),
+    path('maintenance/logs/', views.maintenance_logs, name='maintenance_logs'),
+    path('api/maintenance-entry/', views.api_create_maintenance_entry, name='api_create_maintenance_entry'),
+    # AI Chat
+    path('api/ai/chat/', ai_views.chat_stream, name='ai_chat'),
+    path('api/ai/chat/history/', ai_views.chat_history, name='ai_chat_history'),
+    path('api/ai/chat/clear/', ai_views.chat_clear, name='ai_chat_clear'),
 ]

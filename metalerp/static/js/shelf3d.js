@@ -25,7 +25,7 @@
     var BACK_PANEL_COLOR = 0xe0e0e0;
     var HIGHLIGHT_SHELF_COLOR = 0xcccccc;
 
-    // Shelf geometry — steel sheet proportions
+    // Shelf geometry — steel sheet proportions (updated dynamically from API)
     var NUM_SHELVES = 6;
     var LEVEL_HEIGHT = 0.9;
     var SHELF_HEIGHT = NUM_SHELVES * LEVEL_HEIGHT;
@@ -36,6 +36,17 @@
     var COLS = 4;
     var ROWS_PER_SHELF = 1;
     var SLOTS_PER_SHELF = ROWS_PER_SHELF * COLS; // 4
+
+    function updateShelfConfig(data) {
+        if (data.shelves_per_unit && data.shelves_per_unit !== NUM_SHELVES) {
+            NUM_SHELVES = data.shelves_per_unit;
+            SHELF_HEIGHT = NUM_SHELVES * LEVEL_HEIGHT;
+        }
+        if (data.slots_per_shelf && data.slots_per_shelf !== COLS) {
+            COLS = data.slots_per_shelf;
+            SLOTS_PER_SHELF = ROWS_PER_SHELF * COLS;
+        }
+    }
     // Steel sheets: wide, very thin, deep — single row fills depth
     var PALLET_W = 2.0;
     var PALLET_H = 0.15;
@@ -703,7 +714,7 @@
             var storeBtn = document.getElementById('markStoredBtn');
             var label3d = document.getElementById('shelfLabel3D');
 
-            if (!overlay || !container) return;
+            if (!container) return;
 
             if (storeBtn) {
                 storeBtn.disabled = false;
@@ -713,8 +724,10 @@
                 delete storeBtn.dataset.redirectShelf;
             }
 
-            overlay.classList.add('active');
-            document.body.style.overflow = 'hidden';
+            if (overlay) {
+                overlay.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            }
 
             var parts = shelfId.split('-');
             var sector = parts[0];
@@ -740,6 +753,9 @@
                         console.error(data.error);
                         return;
                     }
+
+                    // Update shelf geometry from warehouse config
+                    updateShelfConfig(data);
 
                     if (capacityEl) capacityEl.textContent = data.percentage + '% Full';
 
@@ -807,8 +823,10 @@
 
         close: function () {
             var overlay = document.getElementById('shelfModalOverlay');
-            if (overlay) overlay.classList.remove('active');
-            document.body.style.overflow = '';
+            if (overlay) {
+                overlay.classList.remove('active');
+                document.body.style.overflow = '';
+            }
             disposeScene();
         },
 
