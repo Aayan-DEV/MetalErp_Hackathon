@@ -1,23 +1,4 @@
 document.addEventListener('DOMContentLoaded', function () {
-    // Sidebar toggle (mobile)
-    var menuToggle = document.getElementById('menuToggle');
-    var sidebar = document.getElementById('sidebar');
-    var overlay = document.getElementById('sidebarOverlay');
-
-    if (menuToggle) {
-        menuToggle.addEventListener('click', function () {
-            sidebar.classList.toggle('open');
-            overlay.classList.toggle('open');
-        });
-    }
-
-    if (overlay) {
-        overlay.addEventListener('click', function () {
-            sidebar.classList.remove('open');
-            overlay.classList.remove('open');
-        });
-    }
-
     // Animated counters
     var counters = document.querySelectorAll('[data-count]');
     var duration = 700;
@@ -60,13 +41,12 @@ document.addEventListener('DOMContentLoaded', function () {
         counters.forEach(animateCounter);
     }
 
-    // Shipment wizard — N key shortcut
+    // Shipment dock — N key shortcut
     document.addEventListener('keydown', function (e) {
         if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
         if (e.key === 'n' || e.key === 'N') {
-            var wizard = document.getElementById('shipmentWizardOverlay');
-            if (wizard && typeof openShipmentWizard === 'function') {
-                openShipmentWizard();
+            if (typeof triggerNewShipment === 'function') {
+                triggerNewShipment();
             }
         }
     });

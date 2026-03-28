@@ -10,6 +10,8 @@
     var shelfGroup;
     var currentShelfId = null;
     var currentTargetShelf = 1;
+    var currentAllLevels = null;
+    var currentDeliveryId = null;
     var slotMeshes = [];
     var topdownAnimId = null;
 
@@ -192,7 +194,7 @@
             canvas.height = 32;
             var ctx = canvas.getContext('2d');
             ctx.fillStyle = s === targetShelf ? '#1A1A1A' : '#aaaaaa';
-            ctx.font = (s === targetShelf ? 'bold ' : '') + '18px Inter, sans-serif';
+            ctx.font = (s === targetShelf ? 'bold ' : '') + '18px DM Sans, sans-serif';
             ctx.textAlign = 'center';
             ctx.textBaseline = 'middle';
             ctx.fillText('S' + s, 32, 16);
@@ -205,6 +207,52 @@
         }
 
         scene.add(shelfGroup);
+    }
+
+    // ========================================
+    // Place static pallets on OTHER levels (non-interactive, just visual)
+    // ========================================
+
+    function placeOtherLevelPallets(allLevels, targetShelf) {
+        if (!allLevels) return;
+        var startX = -SHELF_WIDTH / 2 + PALLET_W / 2 + GAP + UPRIGHT_WIDTH;
+        var stepX = (SHELF_WIDTH - PALLET_W - 2 * GAP - 2 * UPRIGHT_WIDTH) / (COLS - 1);
+        var palletDepth = PALLET_D * 0.85;
+        var otherPalletColor = 0x999999;
+        var otherRecentColor = 0x4a9eff;
+
+        for (var level = 1; level <= NUM_SHELVES; level++) {
+            if (level === targetShelf) continue;  // Skip target — handled by placePallets
+            var levelData = allLevels[String(level)];
+            if (!levelData || !levelData.occupied_slots || levelData.occupied_slots.length === 0) continue;
+
+            var baseY = (level - 1) * LEVEL_HEIGHT + SHELF_THICKNESS;
+            var recentSlots = levelData.recently_stored || [];
+
+            for (var col = 0; col < COLS; col++) {
+                if (levelData.occupied_slots.indexOf(col) === -1) continue;
+                var isRecent = recentSlots.indexOf(col) !== -1;
+                var x = startX + col * stepX;
+                var y = baseY + PALLET_H / 2;
+
+                var geo = new THREE.BoxGeometry(PALLET_W - 0.08, PALLET_H, palletDepth);
+                var color = isRecent ? otherRecentColor : otherPalletColor;
+                var mat = new THREE.MeshStandardMaterial({
+                    color: color, roughness: 0.5, metalness: 0.15,
+                    transparent: true, opacity: 0.7
+                });
+                if (isRecent) {
+                    mat.emissive = new THREE.Color(otherRecentColor);
+                    mat.emissiveIntensity = 0.15;
+                }
+                var mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(x, y, 0);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                scene.add(mesh);
+                otherLevelMeshes.push(mesh);
+            }
+        }
     }
 
     // ========================================
@@ -334,12 +382,12 @@
 
         // Title
         ctx.fillStyle = '#1A1A1A';
-        ctx.font = 'bold 13px Inter, system-ui, sans-serif';
+        ctx.font = 'bold 13px DM Sans, system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText('Sector ' + sector + ' \u00B7 Unit ' + unit, w / 2, 42);
 
         ctx.fillStyle = '#999';
-        ctx.font = '11px Inter, system-ui, sans-serif';
+        ctx.font = '11px DM Sans, system-ui, sans-serif';
         ctx.fillText('Shelf ' + targetShelf + ' \u2014 Top View', w / 2, 60);
 
         // Grid — single row
@@ -351,12 +399,15 @@
         var offsetX = (w - gridW) / 2;
         var offsetY = gridTop;
 
-        for (var col = 0; col < COLS; col++) {
-            var slotIndex = col;
+        // Display columns left to right: C1, C2, C3, C4
+        var displayOrder = [0, 1, 2, 3];
+
+        for (var vi = 0; vi < COLS; vi++) {
+            var slotIndex = displayOrder[vi];
             var isOccupied = occupiedSlots.indexOf(slotIndex) !== -1;
             var isNext = slotIndex === nextAvailable;
 
-            var cx = offsetX + col * cellW;
+            var cx = offsetX + vi * cellW;
             var cy = offsetY;
             var pad = 4;
 
@@ -369,7 +420,7 @@
                 ctx.fillStyle = '#4a9eff';
                 ctx.fill();
                 ctx.fillStyle = '#fff';
-                ctx.font = 'bold 11px Inter, system-ui, sans-serif';
+                ctx.font = 'bold 11px DM Sans, system-ui, sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText('P' + (slotIndex + 1), cx + cellW / 2, cy + cellH / 2);
@@ -377,7 +428,7 @@
                 ctx.fillStyle = '#888888';
                 ctx.fill();
                 ctx.fillStyle = '#fff';
-                ctx.font = 'bold 11px Inter, system-ui, sans-serif';
+                ctx.font = 'bold 11px DM Sans, system-ui, sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText('P' + (slotIndex + 1), cx + cellW / 2, cy + cellH / 2);
@@ -389,7 +440,7 @@
                 ctx.lineWidth = 2;
                 ctx.stroke();
                 ctx.fillStyle = '#fff';
-                ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+                ctx.font = 'bold 10px DM Sans, system-ui, sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText('NEXT', cx + cellW / 2, cy + cellH / 2);
@@ -398,20 +449,20 @@
                 ctx.lineWidth = 1;
                 ctx.stroke();
                 ctx.fillStyle = '#ccc';
-                ctx.font = '10px Inter, system-ui, sans-serif';
+                ctx.font = '10px DM Sans, system-ui, sans-serif';
                 ctx.textAlign = 'center';
                 ctx.textBaseline = 'middle';
                 ctx.fillText(slotIndex + 1, cx + cellW / 2, cy + cellH / 2);
             }
         }
 
-        // Column labels
+        // Column labels (match center-out display order)
         ctx.fillStyle = '#999';
-        ctx.font = '9px Inter, system-ui, sans-serif';
+        ctx.font = '9px DM Sans, system-ui, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'top';
         for (var c = 0; c < COLS; c++) {
-            ctx.fillText('C' + (c + 1), offsetX + c * cellW + cellW / 2, offsetY + cellH + 8);
+            ctx.fillText('C' + (displayOrder[c] + 1), offsetX + c * cellW + cellW / 2, offsetY + cellH + 8);
         }
 
         // Legend
@@ -429,7 +480,7 @@
                 roundRect(ctx, legendX + i * 90, legendY, 12, 12, 2);
                 ctx.fill();
                 ctx.fillStyle = '#999';
-                ctx.font = '9px Inter, system-ui, sans-serif';
+                ctx.font = '9px DM Sans, system-ui, sans-serif';
                 ctx.textAlign = 'left';
                 ctx.textBaseline = 'middle';
                 ctx.fillText(item.label, legendX + i * 90 + 16, legendY + 6);
@@ -461,6 +512,18 @@
     // ========================================
     // Rebuild Slots After Store (keeps 3D in sync)
     // ========================================
+
+    // Track other-level pallet meshes so we can remove them on rebuild
+    var otherLevelMeshes = [];
+
+    function removeOtherLevelPallets() {
+        otherLevelMeshes.forEach(function (m) {
+            scene.remove(m);
+            if (m.geometry) m.geometry.dispose();
+            if (m.material) m.material.dispose();
+        });
+        otherLevelMeshes = [];
+    }
 
     function rebuildSlots(occupiedSlots, nextAvailable, targetShelf, justStoredSlot) {
         // Remove old slot meshes from scene
@@ -619,6 +682,7 @@
         shelfGroup = null;
         slotMeshes = [];
         currentShelfId = null;
+        currentAllLevels = null;
     }
 
     // ========================================
@@ -626,10 +690,11 @@
     // ========================================
 
     window.Shelf3D = {
-        open: function (shelfId) {
+        open: function (shelfId, trackDeliveryId) {
             disposeScene();
 
             currentShelfId = shelfId;
+            currentDeliveryId = trackDeliveryId || null;
             var overlay = document.getElementById('shelfModalOverlay');
             var container = document.getElementById('threeContainer');
             var topdownCanvas = document.getElementById('topdownCanvas');
@@ -644,6 +709,8 @@
                 storeBtn.disabled = false;
                 storeBtn.textContent = 'Mark as Stored';
                 storeBtn.style.display = '';
+                storeBtn.onclick = function() { Shelf3D.markStored(); };
+                delete storeBtn.dataset.redirectShelf;
             }
 
             overlay.classList.add('active');
@@ -686,20 +753,46 @@
                     var percentText = document.getElementById('capacityPercent');
                     if (percentText) percentText.textContent = data.percentage + '%';
 
+                    // Track delivery ID from the shelf info
+                    if (data.pending_delivery_id) {
+                        currentDeliveryId = data.pending_delivery_id;
+                    }
+
                     if (storeBtn) {
-                        if (data.next_available !== null) {
+                        var progressText = '';
+                        if (data.pallets_needed > 0) {
+                            progressText = ' (' + data.pallets_stored + '/' + data.pallets_needed + ')';
+                        }
+
+                        if (data.pallets_needed > 0 && data.pallets_stored >= data.pallets_needed) {
+                            // All pallets already stored — show done state
+                            storeBtn.style.display = '';
+                            storeBtn.disabled = true;
+                            storeBtn.textContent = 'All Pallets Stored' + progressText;
+                        } else if (data.next_available !== null) {
                             storeBtn.style.display = '';
                             storeBtn.disabled = false;
-                            storeBtn.textContent = 'Mark as Stored';
+                            storeBtn.textContent = 'Mark as Stored' + progressText;
                             storeBtn.dataset.slotIndex = data.next_available;
+                        } else if (data.has_pending_delivery && data.next_available_shelf) {
+                            // Shelf full but has pending delivery — redirect to next shelf
+                            var delivId = currentDeliveryId;
+                            storeBtn.style.display = '';
+                            storeBtn.disabled = false;
+                            storeBtn.textContent = 'Continue to ' + data.next_available_shelf + progressText;
+                            storeBtn.dataset.redirectShelf = data.next_available_shelf;
+                            storeBtn.onclick = function() { Shelf3D.open(data.next_available_shelf, delivId); };
                         } else {
                             storeBtn.style.display = 'none';
                         }
                     }
 
+                    currentAllLevels = data.all_levels || null;
+
                     initScene(container);
                     buildShelf(targetShelf);
                     placePallets(data.occupied_slots, data.next_available, targetShelf, data.recently_stored);
+                    placeOtherLevelPallets(currentAllLevels, targetShelf);
                     animate();
 
                     if (topdownCanvas) {
@@ -741,10 +834,13 @@
                 storeBtn.textContent = 'Storing...';
             }
 
+            var payload = { shelf_id: currentShelfId, slot_index: slotIndex };
+            if (currentDeliveryId) payload.delivery_id = currentDeliveryId;
+
             fetch('/api/mark-stored/', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
-                body: JSON.stringify({ shelf_id: currentShelfId, slot_index: slotIndex })
+                body: JSON.stringify(payload)
             })
             .then(function (res) { return res.json(); })
             .then(function (data) {
@@ -773,6 +869,19 @@
                     // Rebuild all slot meshes to reflect new state
                     rebuildSlots(data.occupied_slots, data.next_available, currentTargetShelf, slotIndex);
 
+                    // Re-render other level pallets (update currentAllLevels for this level)
+                    removeOtherLevelPallets();
+                    if (currentAllLevels) {
+                        currentAllLevels[String(currentTargetShelf)] = {
+                            shelf_id: currentShelfId,
+                            occupied_slots: data.occupied_slots,
+                            recently_stored: [slotIndex],
+                            percentage: data.percentage,
+                            next_available: data.next_available
+                        };
+                        placeOtherLevelPallets(currentAllLevels, currentTargetShelf);
+                    }
+
                     var topdownCanvas = document.getElementById('topdownCanvas');
                     if (topdownCanvas) {
                         if (topdownAnimId) cancelAnimationFrame(topdownAnimId);
@@ -780,10 +889,30 @@
                         animateTopDown(topdownCanvas, data.occupied_slots, data.next_available, currentTargetShelf, parts[0], parts[1], [slotIndex]);
                     }
 
+                    // Check quantity-based capacity: disable if all pallets for this delivery are placed
+                    var allPalletsPlaced = data.pallets_needed > 0 && data.pallets_stored >= data.pallets_needed;
+
                     if (storeBtn) {
-                        if (data.next_available !== null) {
+                        if (allPalletsPlaced) {
+                            storeBtn.textContent = 'All Pallets Stored (' + data.pallets_stored + '/' + data.pallets_needed + ')';
+                            storeBtn.disabled = true;
+                        } else if (data.overflow_shelf) {
+                            // Shelf is full but delivery has remaining pallets — switch to overflow shelf
                             storeBtn.disabled = false;
-                            storeBtn.textContent = 'Mark as Stored';
+                            var progressText = ' (' + data.pallets_stored + '/' + data.pallets_needed + ')';
+                            storeBtn.textContent = 'Continue on ' + data.overflow_shelf + progressText;
+                            storeBtn.dataset.slotIndex = data.overflow_next_slot;
+                            // Auto-switch to the new shelf after a short delay, passing delivery ID
+                            var delivId = currentDeliveryId;
+                            setTimeout(function() {
+                                Shelf3D.open(data.overflow_shelf, delivId);
+                            }, 1500);
+                        } else if (data.next_available !== null) {
+                            storeBtn.disabled = false;
+                            var progressText = data.pallets_needed > 0
+                                ? ' (' + data.pallets_stored + '/' + data.pallets_needed + ')'
+                                : '';
+                            storeBtn.textContent = 'Mark as Stored' + progressText;
                             storeBtn.dataset.slotIndex = data.next_available;
                         } else {
                             storeBtn.textContent = 'Shelf Full';
@@ -791,13 +920,43 @@
                         }
                     }
 
-                    var row = document.querySelector('tr[data-shelf="' + currentShelfId + '"]');
-                    if (row) {
-                        var statusCell = row.querySelector('.status-badge');
-                        if (statusCell && data.percentage === 100) {
-                            statusCell.textContent = 'Stored';
-                            statusCell.className = 'status-badge completed';
+                    // Update row statuses for the new two-column layout
+                    var rows = document.querySelectorAll('tr[data-shelf="' + currentShelfId + '"]');
+                    rows.forEach(function(row) {
+                        // Update shipment status
+                        if (allPalletsPlaced) {
+                            var shipmentBadge = row.querySelector('.shipment-status');
+                            if (shipmentBadge) {
+                                shipmentBadge.textContent = 'Placed';
+                                shipmentBadge.className = 'status-badge shipment-status placed';
+                            }
                         }
+                        // Update shelf status
+                        var shelfBadge = row.querySelector('.shelf-status');
+                        if (shelfBadge) {
+                            if (data.percentage >= 100) {
+                                shelfBadge.textContent = 'Full (' + data.occupied_count + '/4)';
+                                shelfBadge.className = 'status-badge shelf-status shelf-full-badge';
+                            } else {
+                                shelfBadge.textContent = 'Open (' + data.occupied_count + '/4)';
+                                shelfBadge.className = 'status-badge shelf-status shelf-open-badge';
+                            }
+                        }
+                    });
+
+                    // If overflow happened, also update the shelf_id cell in the table row
+                    if (data.overflow_shelf) {
+                        rows.forEach(function(row) {
+                            row.dataset.shelf = data.overflow_shelf;
+                            // Find the shelf ID cell and update it
+                            var tds = row.querySelectorAll('td');
+                            for (var i = 0; i < tds.length; i++) {
+                                if (tds[i].textContent.trim() === currentShelfId) {
+                                    tds[i].textContent = data.overflow_shelf;
+                                    break;
+                                }
+                            }
+                        });
                     }
                 });
             })
