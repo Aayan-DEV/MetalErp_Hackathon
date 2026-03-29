@@ -2849,7 +2849,7 @@ def _supervisor_daily_briefing(params):
     total_health = 0
     needs_attention = []
     for m in machines:
-        h = _compute_health(m.usage_count, m.failure_threshold)
+        h = _compute_health(m.usage_count, m.failure_threshold)['health']
         total_health += h
         if h < 50:
             needs_attention.append({'name': m.machine_name, 'id': m.machine_id, 'health': h})
