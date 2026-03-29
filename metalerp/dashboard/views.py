@@ -317,33 +317,107 @@ def mark_stored(request):
 
 @require_GET
 def generate_delivery(request):
+    """Generate a single delivery (legacy endpoint)."""
+    pallets = _generate_delivery_batch(1, _get_current_warehouse(request))
+    return JsonResponse(pallets[0])
+
+
+@require_GET
+def generate_delivery_batch(request):
+    """Generate multiple deliveries in one call, each on a different shelf."""
+    count = int(request.GET.get('count', 3))
+    count = max(1, min(count, 6))
     warehouse = _get_current_warehouse(request)
-    manufacturer = random.choice(MANUFACTURERS)
-    prefix = ''.join([w[0] for w in manufacturer.split()[:2]]).upper()
-    batch_id = f'BATCH-{prefix}-{random.randint(1000, 9999)}-{uuid.uuid4().hex[:4]}'
-    size = random.choice(MATERIAL_SIZES)
+    pallets = _generate_delivery_batch(count, warehouse)
+    return JsonResponse({'pallets': pallets})
 
-    # Pick quantity first, then find a shelf that can fit all pallets
+
+def _generate_delivery_batch(count, warehouse):
+    """Generate `count` deliveries, assigning each to distinct best-fit shelves."""
     cfg = _get_warehouse_config(warehouse)
-    quantity = random.randint(1, min(4, cfg['slots_per_shelf']))
-    shelf_id = _find_available_shelf(needed=quantity, warehouse=warehouse)
-    quantity = str(quantity)
+    slots_per_shelf = cfg['slots_per_shelf']
 
-    # Pick a random material
-    material = Material.objects.order_by('?').first()
-    material_id = material.id if material else None
-    material_name = material.name if material else ''
+    # Build occupancy map once
+    occupied_counts = {}
+    qs = ShelfSlot.objects.filter(is_occupied=True)
+    if warehouse:
+        qs = qs.filter(warehouse=warehouse)
+    for slot in qs.values('shelf_id').annotate(count=Count('id')):
+        occupied_counts[slot['shelf_id']] = slot['count']
 
-    return JsonResponse({
-        'manufacturer': manufacturer,
-        'date': str(date.today()),
-        'size': size,
-        'batch_id': batch_id,
-        'quantity': quantity,
-        'shelf_id': shelf_id,
-        'material_id': material_id,
-        'material_name': material_name,
-    })
+    # Also count pending (not-yet-stored) deliveries already assigned to each shelf
+    pending_reserved = {}
+    pending_qs = Delivery.objects.filter(status='pending').values_list('shelf_id', 'quantity')
+    if warehouse:
+        pending_qs = pending_qs.filter(warehouse=warehouse)
+    for sid, qty_str in pending_qs:
+        if not sid:
+            continue
+        try:
+            qty = int(''.join(c for c in qty_str if c.isdigit()) or '1')
+        except ValueError:
+            qty = 1
+        pending_reserved[sid] = pending_reserved.get(sid, 0) + qty
+
+    # Merge: effective occupied = actual slots + pending reservations
+    def effective_occupied(shelf_id):
+        return occupied_counts.get(shelf_id, 0) + pending_reserved.get(shelf_id, 0)
+
+    # Build ordered shelf list
+    all_shelves = []
+    for s in cfg['sectors']:
+        for u in cfg['units']:
+            for sh in range(1, cfg['shelves_per_unit'] + 1):
+                all_shelves.append(f'{s}-{u}-{sh}')
+
+    materials = list(Material.objects.all())
+    pallets = []
+    # Track reservations made during this batch so subsequent pallets avoid same shelf
+    batch_reserved = {}
+
+    for _ in range(count):
+        quantity = random.randint(1, min(4, slots_per_shelf))
+
+        # Find best shelf considering batch-local reservations
+        best_shelf = None
+        best_waste = slots_per_shelf + 1
+        fallback_shelf = None
+        fallback_free = 0
+        for shelf_id in all_shelves:
+            occ = effective_occupied(shelf_id) + batch_reserved.get(shelf_id, 0)
+            free = slots_per_shelf - occ
+            if free <= 0:
+                continue
+            if free >= quantity:
+                waste = free - quantity
+                if waste < best_waste:
+                    best_waste = waste
+                    best_shelf = shelf_id
+            elif free > fallback_free:
+                fallback_free = free
+                fallback_shelf = shelf_id
+
+        shelf_id = best_shelf or fallback_shelf or all_shelves[0]
+        batch_reserved[shelf_id] = batch_reserved.get(shelf_id, 0) + quantity
+
+        manufacturer = random.choice(MANUFACTURERS)
+        prefix = ''.join([w[0] for w in manufacturer.split()[:2]]).upper()
+        batch_id = f'BATCH-{prefix}-{random.randint(1000, 9999)}-{uuid.uuid4().hex[:4]}'
+        size = random.choice(MATERIAL_SIZES)
+        material = random.choice(materials) if materials else None
+
+        pallets.append({
+            'manufacturer': manufacturer,
+            'date': str(date.today()),
+            'size': size,
+            'batch_id': batch_id,
+            'quantity': str(quantity),
+            'shelf_id': shelf_id,
+            'material_id': material.id if material else None,
+            'material_name': material.name if material else '',
+        })
+
+    return pallets
 
 
 def _find_available_shelf(needed=1, warehouse=None):
@@ -379,11 +453,25 @@ def _find_available_shelf(needed=1, warehouse=None):
     for slot in qs.values('shelf_id').annotate(count=Count('id')):
         occupied_counts[slot['shelf_id']] = slot['count']
 
+    # Count pending delivery reservations
+    pending_reserved = {}
+    pqs = Delivery.objects.filter(status='pending').values_list('shelf_id', 'quantity')
+    if warehouse:
+        pqs = pqs.filter(warehouse=warehouse)
+    for sid, qty_str in pqs:
+        if not sid:
+            continue
+        try:
+            qty = int(''.join(c for c in qty_str if c.isdigit()) or '1')
+        except ValueError:
+            qty = 1
+        pending_reserved[sid] = pending_reserved.get(sid, 0) + qty
+
     # Categorise shelves
     fits = []       # shelves where all `needed` pallets fit
     partial = []    # shelves with some free space but not enough
     for shelf_id in all_shelves:
-        occupied = occupied_counts.get(shelf_id, 0)
+        occupied = occupied_counts.get(shelf_id, 0) + pending_reserved.get(shelf_id, 0)
         free = slots_per_shelf - occupied
         if free <= 0:
             continue

@@ -939,14 +939,14 @@ function startScanning(shipment) {
         }, 150);
     }
     var count = 2 + Math.floor(Math.random() * 3);
-    var promises = [];
-    for (var i = 0; i < count; i++) promises.push(fetch('/api/generate-delivery/').then(function(r){ return r.json(); }));
     setTimeout(function() {
         if (titleEl) titleEl.textContent = 'Shipment Detected!';
         if (subEl) subEl.textContent = 'Preparing pallet details...';
     }, 2500);
-    Promise.all(promises).then(function(results) {
-        shipment.pallets = results;
+    fetch('/api/generate-delivery-batch/?count=' + count)
+        .then(function(r){ return r.json(); })
+        .then(function(data) {
+        shipment.pallets = data.pallets;
         setTimeout(function() {
             DockScanScene.dispose();
             shipment.step = 1;

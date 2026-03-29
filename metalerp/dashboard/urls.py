@@ -21,6 +21,7 @@ urlpatterns = [
     path('api/shelf-info/', views.shelf_info, name='shelf_info'),
     path('api/mark-stored/', views.mark_stored, name='mark_stored'),
     path('api/generate-delivery/', views.generate_delivery, name='generate_delivery'),
+    path('api/generate-delivery-batch/', views.generate_delivery_batch, name='generate_delivery_batch'),
     path('api/add-delivery/', views.add_delivery, name='add_delivery'),
     path('api/warehouse-map/', views.warehouse_map, name='warehouse_map'),
     path('api/warehouse-stats/', views.warehouse_stats, name='warehouse_stats'),
