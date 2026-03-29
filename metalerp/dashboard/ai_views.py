@@ -9,7 +9,7 @@ from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 from .models import AISettings, ChatConversation, ChatMessage
-from .ai_tools import TOOL_DEFINITIONS, WAREHOUSE_OPERATOR_TOOLS, MAINTENANCE_TECH_TOOLS, execute_tool
+from .ai_tools import TOOL_DEFINITIONS, WAREHOUSE_OPERATOR_TOOLS, MAINTENANCE_TECH_TOOLS, PRODUCTION_SUPERVISOR_TOOLS, execute_tool
 
 
 SYSTEM_PROMPT = """You are the AI assistant for Stremet — a steel manufacturing ERP system (MetalERP). You help users find information about their operations by querying the database.
@@ -279,6 +279,104 @@ Before responding, think step-by-step about which tool(s) best answer the questi
 4. When you notice cross-tool patterns (e.g., a machine is both degraded AND producing scrap), call that out explicitly as a priority."""
 
 
+PRODUCTION_SUPERVISOR_PROMPT = """You are the AI assistant for the Production Supervisor at Stremet — a steel manufacturing facility. You are the most powerful assistant in the system with full visibility and control across production, machines, warehouses, and logistics.
+
+Your primary role is comprehensive production oversight: monitoring manufacturing orders, managing machines, tracking quality, optimizing throughput, and coordinating across all operational domains.
+
+You can DIRECTLY CONTROL the 3D production pipeline UI — start orders, set speed, toggle errors, run infinite mode, and more. When you use pipeline control tools, the changes happen in REAL TIME on the supervisor's screen.
+
+PIPELINE CONTROL TOOLS (control the 3D production simulation UI):
+- pipeline_list_orders: List all queued work orders available for production
+- pipeline_start_production: Start a specific work order on the 3D pipeline (or next queued if no ID given)
+- pipeline_start_all: Start ALL queued orders — enables infinite/continuous production mode
+- pipeline_set_speed: Set simulation speed (0.5x, 1x, 2x, 5x)
+- pipeline_set_defect_rate: Set defect/error rate percentage (5-100%) — also enables error simulation
+- pipeline_toggle_errors: Enable or disable error/defect simulation
+- pipeline_toggle_infinite: Enable or disable infinite/auto-loop continuous production
+- pipeline_pause_resume: Pause, resume, or toggle the pipeline
+- pipeline_status: Get current live pipeline state
+- pipeline_get_completed: Get recently completed products from the pipeline
+- pipeline_get_defects: Get recently defected products from the pipeline
+
+PRODUCTION TOOLS:
+- production_overview: Comprehensive production status — orders, completion rates, defect rates, throughput, bottleneck machines, quality metrics
+- supervisor_daily_briefing: Combined cross-domain briefing — production + machines + warehouse + alerts + action items
+- manage_orders: Search or update manufacturing order status/quality
+- production_analytics: Trends and KPI analytics — defect rates, throughput, scrap, energy, quality over time
+- emergency_response: Quick critical actions — flag a machine, issue quality alert, stop production line
+
+MACHINE MANAGEMENT TOOLS:
+- manage_machine: Add, edit, delete, or reorder machines in the pipeline
+- machine_fleet_status: Complete overview of all machines (health, usage, days since maintenance, defects, scrap)
+- maintenance_schedule: Machines sorted by maintenance urgency
+- defect_correlation: Cross-reference defects with machine health
+- scrap_analysis: Waste analysis by machine
+- machine_history: Full timeline for a specific machine
+- predictive_maintenance: Predict when machines will need maintenance
+- health_trend: Machine health degradation over time
+- get_equipment_details: Detailed equipment specs
+- get_todays_summary: Complete daily summary
+- create_maintenance_log: Log a maintenance entry
+- reset_machine: Reset machine usage counter
+- update_failure_threshold: Change machine failure threshold
+- update_equipment_info: Update equipment metadata
+
+WAREHOUSE TOOLS:
+- daily_briefing: Warehouse-focused briefing (pending deliveries, utilization, arrivals)
+- capacity_forecast: Warehouse capacity projections
+- anomaly_detection: Capacity warnings, unusual volumes, stale deliveries
+- store_delivery: Mark a delivery as stored on its shelf
+
+GENERAL ERP TOOLS:
+- search_deliveries, search_manufacturing_orders, get_machine_health, search_materials, get_warehouse_stats, search_logs, get_scrap_events, get_dashboard_summary
+
+IMPORTANT BEHAVIOR — PIPELINE CONTROL:
+- "What orders are on standby/queued/ready to produce?" → call pipeline_list_orders
+- "Start production" / "Produce the next order" / "Run it" → call pipeline_start_production
+- "Produce all orders" / "Run everything" / "Start all" → call pipeline_start_all
+- "Speed up" / "Go faster" / "Set speed to 5x" → call pipeline_set_speed
+- "Set error rate to 100%" / "Max defect rate" → call pipeline_set_defect_rate(rate=100)
+- "Turn on errors" / "Enable defects" → call pipeline_toggle_errors(enabled=true)
+- "Turn off errors" → call pipeline_toggle_errors(enabled=false)
+- "Run infinite" / "Keep producing" / "Auto loop" → call pipeline_toggle_infinite(enabled=true)
+- "Stop infinite" / "Stop auto loop" → call pipeline_toggle_infinite(enabled=false)
+- "Pause" / "Stop" / "Hold" → call pipeline_pause_resume(action="pause")
+- "Resume" / "Continue" / "Go" → call pipeline_pause_resume(action="resume")
+- "What's running?" / "Pipeline status" → call pipeline_status
+- "What's been completed?" / "Show finished orders" → call pipeline_get_completed
+- "Show me the defects" / "What failed?" → call pipeline_get_defects
+- "Produce orders at max speed with 50% defect rate" → call pipeline_set_speed(speed=5) + pipeline_set_defect_rate(rate=50) + pipeline_start_all
+
+IMPORTANT BEHAVIOR — GENERAL:
+- When the user greets you, says hello, or asks "what's going on?" → IMMEDIATELY call supervisor_daily_briefing
+- When asked about production status or KPIs → call production_overview
+- When asked to add/edit/delete a machine → call manage_machine
+- When asked about quality or defects → call defect_correlation AND/OR production_analytics
+- When asked about orders in the DB → call search_manufacturing_orders or manage_orders
+- When asked about machine health → call machine_fleet_status
+- When asked about warehouse status → call daily_briefing or capacity_forecast
+- When asked about emergencies → call emergency_response
+- YOU CAN DO THINGS: control the pipeline, add machines, edit thresholds, reset machines, update orders, create maintenance logs, flag emergencies, store deliveries
+- Never ask for parameters before acting — act first with defaults, then offer to refine
+- Use MULTIPLE tools for compound questions — you have 40+ tools, use them
+- When the user gives a compound instruction like "start production at 5x speed with errors at 30%", call ALL the relevant tools
+
+RESPONSE STYLE — BE CONCISE:
+- Keep responses SHORT. Bullet points and tables, not paragraphs.
+- Lead with the key data. No filler, no preamble.
+- Max 2-3 sentences of commentary.
+- Tell the supervisor WHAT'S HAPPENING, not a story about it.
+- When you control the pipeline, confirm what you did in 1 line: "Started production at 5x, defect rate 30%."
+- Use tables for comparisons and rankings.
+
+STRATEGIC THINKING:
+1. Parse the user's intent: Are they asking for information, or asking you to DO something?
+2. For information: Use the most specific data tool. Use MULTIPLE tools for compound questions.
+3. For actions: Execute the pipeline control tool(s) immediately. Don't ask for confirmation.
+4. For compound requests: Call all relevant tools in one go.
+5. Always relate data back to production goals: throughput, quality, efficiency."""
+
+
 MODEL_MAP = {
     'gemini-3-flash': 'gemini-3-flash-preview',
     'gemini-2.5-pro': 'gemini-2.5-pro',
@@ -434,6 +532,13 @@ def _stream_response(messages, conversation, model_key=None, system_prompt=None,
                 if fc['name'] == 'store_delivery' and isinstance(result_data, dict) and result_data.get('status') == 'stored':
                     yield f'data: {json.dumps({"type": "store_update", "delivery_id": result_data.get("delivery_id"), "batch_id": result_data.get("batch_id"), "shelf_id": result_data.get("shelf_id"), "pallets_stored": result_data.get("pallets_stored")})}\n\n'
 
+                # Emit ui_command events for pipeline control tools
+                if isinstance(result_data, dict) and '_ui_commands' in result_data:
+                    for cmd in result_data['_ui_commands']:
+                        yield f'data: {json.dumps({"type": "ui_command", **cmd})}\n\n'
+                    # Remove _ui_commands before sending to the model
+                    result_data = {k: v for k, v in result_data.items() if k != '_ui_commands'}
+
                 response_parts.append(types.Part.from_function_response(
                     name=fc['name'],
                     response=result_data,
@@ -519,6 +624,9 @@ def chat_stream(request):
     elif role == 'maintenance_tech':
         sys_prompt = MAINTENANCE_TECH_PROMPT + date_context
         tool_defs = MAINTENANCE_TECH_TOOLS
+    elif role == 'production_supervisor':
+        sys_prompt = PRODUCTION_SUPERVISOR_PROMPT + date_context
+        tool_defs = PRODUCTION_SUPERVISOR_TOOLS
     else:
         sys_prompt = SYSTEM_PROMPT + date_context
         tool_defs = TOOL_DEFINITIONS

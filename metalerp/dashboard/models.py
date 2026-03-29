@@ -130,6 +130,7 @@ class ShelfSlot(models.Model):
     is_occupied = models.BooleanField(default=False)
     warehouse = models.ForeignKey('Warehouse', null=True, blank=True, on_delete=models.CASCADE, related_name='shelf_slots')
     delivery = models.ForeignKey(Delivery, null=True, blank=True, on_delete=models.SET_NULL, related_name='slots')
+    manufacturing_order = models.ForeignKey('ManufacturingOrder', null=True, blank=True, on_delete=models.SET_NULL, related_name='shelf_slots')
     stored_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:

@@ -12,6 +12,8 @@
     var currentTargetShelf = 1;
     var currentAllLevels = null;
     var currentDeliveryId = null;
+    var currentMOId = null;        // Manufacturing order ID for finished goods storage
+    var currentMOWarehouseId = null; // Warehouse ID for finished goods storage
     var slotMeshes = [];
     var topdownAnimId = null;
 
@@ -865,8 +867,8 @@
                 if (data.error) {
                     console.error(data.error);
                     if (storeBtn) {
-                        storeBtn.disabled = false;
-                        storeBtn.textContent = 'Mark as Stored';
+                        storeBtn.textContent = data.error;
+                        storeBtn.disabled = true;
                     }
                     return;
                 }
@@ -938,10 +940,22 @@
                         }
                     }
 
-                    // Update row statuses for the new two-column layout
+                    // Update row statuses — support both legacy and operator table layouts
                     var rows = document.querySelectorAll('tr[data-shelf="' + currentShelfId + '"]');
+                    // Also find rows by delivery ID (operator delivery table)
+                    if (currentDeliveryId) {
+                        var deliveryRows = document.querySelectorAll('tr[data-delivery-id="' + currentDeliveryId + '"]');
+                        deliveryRows.forEach(function(r) {
+                            var found = false;
+                            rows.forEach(function(existing) { if (existing === r) found = true; });
+                            if (!found) {
+                                rows = Array.prototype.slice.call(rows);
+                                rows.push(r);
+                            }
+                        });
+                    }
                     rows.forEach(function(row) {
-                        // Update shipment status
+                        // Legacy layout: .shipment-status / .shelf-status
                         if (allPalletsPlaced) {
                             var shipmentBadge = row.querySelector('.shipment-status');
                             if (shipmentBadge) {
@@ -949,7 +963,6 @@
                                 shipmentBadge.className = 'status-badge shipment-status placed';
                             }
                         }
-                        // Update shelf status
                         var shelfBadge = row.querySelector('.shelf-status');
                         if (shelfBadge) {
                             if (data.percentage >= 100) {
@@ -959,6 +972,37 @@
                                 shelfBadge.textContent = 'Open (' + data.occupied_count + '/4)';
                                 shelfBadge.className = 'status-badge shelf-status shelf-open-badge';
                             }
+                        }
+
+                        // Operator layout: .op-status-badge and progress span
+                        if (allPalletsPlaced) {
+                            var opBadge = row.querySelector('.op-status-badge');
+                            if (opBadge) {
+                                opBadge.textContent = 'STORED';
+                                opBadge.className = 'op-status-badge op-status-stored';
+                            }
+                            // Update progress column
+                            var progressCells = row.querySelectorAll('.op-td-mono');
+                            progressCells.forEach(function(cell) {
+                                if (cell.textContent.match(/\d+\/\d+/)) {
+                                    cell.textContent = 'done';
+                                    cell.className = 'op-td-mono op-progress-full';
+                                }
+                            });
+                            // Hide store button
+                            var storeActionBtn = row.querySelector('.op-btn-store');
+                            if (storeActionBtn) {
+                                storeActionBtn.style.display = 'none';
+                            }
+                        } else {
+                            // Update progress count
+                            var progressCells = row.querySelectorAll('.op-td-mono');
+                            progressCells.forEach(function(cell) {
+                                if (cell.textContent.match(/\d+\/\d+/)) {
+                                    cell.textContent = data.pallets_stored + '/' + data.pallets_needed;
+                                    cell.className = 'op-td-mono ' + (data.pallets_stored > 0 ? 'op-progress-partial' : 'op-progress-none');
+                                }
+                            });
                         }
                     });
 
@@ -983,6 +1027,216 @@
                 if (storeBtn) {
                     storeBtn.disabled = false;
                     storeBtn.textContent = 'Mark as Stored';
+                }
+            });
+        },
+
+        // ── Manufacturing Order Storage Mode ──
+        openForMO: function (shelfId, orderId, warehouseId, onStoredCallback) {
+            disposeScene();
+
+            currentShelfId = shelfId;
+            currentDeliveryId = null;
+            currentMOId = orderId;
+            currentMOWarehouseId = warehouseId;
+
+            var overlay = document.getElementById('shelfModalOverlay');
+            var container = document.getElementById('threeContainer');
+            var topdownCanvas = document.getElementById('topdownCanvas');
+            var capacityEl = document.getElementById('shelfCapacity');
+            var headerEl = document.getElementById('shelfModalHeader');
+            var storeBtn = document.getElementById('markStoredBtn');
+            var label3d = document.getElementById('shelfLabel3D');
+
+            if (!container) return;
+
+            if (storeBtn) {
+                storeBtn.disabled = false;
+                storeBtn.textContent = 'Store Finished Order';
+                storeBtn.style.display = '';
+                storeBtn.onclick = function () { Shelf3D.storeFinishedOrder(onStoredCallback); };
+                delete storeBtn.dataset.redirectShelf;
+            }
+
+            if (overlay) {
+                overlay.classList.add('active');
+                document.body.style.overflow = 'hidden';
+            }
+
+            var parts = shelfId.split('-');
+            var sector = parts[0];
+            var unit = parts[1];
+            var targetShelf = parseInt(parts[2], 10);
+            currentTargetShelf = targetShelf;
+
+            if (headerEl) {
+                headerEl.innerHTML =
+                    '<span class="shelf-tag">Sector ' + sector + '</span>' +
+                    '<span class="shelf-tag">Unit ' + unit + '</span>' +
+                    '<span class="shelf-tag">Shelf ' + targetShelf + '</span>';
+            }
+
+            if (label3d) {
+                label3d.textContent = 'Sector ' + sector + ' \u00B7 Unit ' + unit + ' \u00B7 Shelf ' + targetShelf;
+            }
+
+            var shelfUrl = '/api/shelf-info/?shelf_id=' + encodeURIComponent(shelfId);
+            if (warehouseId) shelfUrl += '&warehouse_id=' + warehouseId;
+
+            fetch(shelfUrl)
+                .then(function (res) { return res.json(); })
+                .then(function (data) {
+                    if (data.error) {
+                        console.error(data.error);
+                        return;
+                    }
+
+                    updateShelfConfig(data);
+
+                    if (capacityEl) capacityEl.textContent = data.percentage + '% Full';
+
+                    var ring = document.getElementById('capacityRing');
+                    if (ring) {
+                        var circumference = 2 * Math.PI * 36;
+                        ring.style.strokeDasharray = circumference;
+                        ring.style.strokeDashoffset = circumference - (data.percentage / 100) * circumference;
+                    }
+
+                    var percentText = document.getElementById('capacityPercent');
+                    if (percentText) percentText.textContent = data.percentage + '%';
+
+                    if (storeBtn) {
+                        if (data.next_available !== null) {
+                            storeBtn.style.display = '';
+                            storeBtn.disabled = false;
+                            storeBtn.textContent = 'Store Finished Order';
+                            storeBtn.dataset.slotIndex = data.next_available;
+                        } else {
+                            storeBtn.textContent = 'Shelf Full';
+                            storeBtn.disabled = true;
+                        }
+                    }
+
+                    currentAllLevels = data.all_levels || null;
+
+                    initScene(container);
+                    buildShelf(targetShelf);
+                    placePallets(data.occupied_slots, data.next_available, targetShelf, data.recently_stored);
+                    placeOtherLevelPallets(currentAllLevels, targetShelf);
+                    animate();
+
+                    if (topdownCanvas) {
+                        topdownPulseTime = 0;
+                        animateTopDown(topdownCanvas, data.occupied_slots, data.next_available, targetShelf, sector, unit, data.recently_stored);
+                    }
+                })
+                .catch(function (err) {
+                    console.error('Failed to load shelf info:', err);
+                });
+        },
+
+        storeFinishedOrder: function (onStoredCallback) {
+            if (!currentShelfId || !currentMOId) return;
+            var storeBtn = document.getElementById('markStoredBtn');
+            var slotIndex = storeBtn ? parseInt(storeBtn.dataset.slotIndex, 10) : null;
+            if (slotIndex === null || isNaN(slotIndex)) return;
+            if (storeBtn && storeBtn.disabled) return;
+
+            var csrfToken = '';
+            var csrfInput = document.querySelector('[name=csrfmiddlewaretoken]');
+            if (csrfInput) csrfToken = csrfInput.value;
+            if (!csrfToken) {
+                var csrfCookie = document.cookie.split(';').find(function (c) {
+                    return c.trim().startsWith('csrftoken=');
+                });
+                if (csrfCookie) csrfToken = csrfCookie.split('=')[1];
+            }
+
+            if (storeBtn) {
+                storeBtn.disabled = true;
+                storeBtn.textContent = 'Storing...';
+            }
+
+            fetch('/api/store-finished-order/', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-CSRFToken': csrfToken },
+                body: JSON.stringify({
+                    order_id: currentMOId,
+                    warehouse_id: currentMOWarehouseId,
+                    shelf_id: currentShelfId,
+                    slot_index: slotIndex
+                })
+            })
+            .then(function (res) { return res.json(); })
+            .then(function (data) {
+                if (data.error) {
+                    console.error(data.error);
+                    if (storeBtn) {
+                        storeBtn.textContent = data.error;
+                        storeBtn.disabled = true;
+                    }
+                    return;
+                }
+
+                animatePalletDrop(slotIndex, function () {
+                    if (storeBtn) {
+                        storeBtn.textContent = 'Stored \u2714';
+                        storeBtn.disabled = true;
+                    }
+
+                    // Rebuild slots to show the newly placed pallet
+                    var refreshUrl = '/api/shelf-info/?shelf_id=' + encodeURIComponent(currentShelfId);
+                    if (currentMOWarehouseId) refreshUrl += '&warehouse_id=' + currentMOWarehouseId;
+                    fetch(refreshUrl)
+                        .then(function (r) { return r.json(); })
+                        .then(function (info) {
+                            if (!info.error) {
+                                var capacityEl = document.getElementById('shelfCapacity');
+                                if (capacityEl) capacityEl.textContent = info.percentage + '% Full';
+
+                                var ring = document.getElementById('capacityRing');
+                                if (ring) {
+                                    var circumference = 2 * Math.PI * 36;
+                                    ring.style.strokeDashoffset = circumference - (info.percentage / 100) * circumference;
+                                }
+
+                                var percentText = document.getElementById('capacityPercent');
+                                if (percentText) percentText.textContent = info.percentage + '%';
+
+                                rebuildSlots(info.occupied_slots, info.next_available, currentTargetShelf, slotIndex);
+
+                                removeOtherLevelPallets();
+                                if (currentAllLevels) {
+                                    currentAllLevels[String(currentTargetShelf)] = {
+                                        shelf_id: currentShelfId,
+                                        occupied_slots: info.occupied_slots,
+                                        recently_stored: [slotIndex],
+                                        percentage: info.percentage,
+                                        next_available: info.next_available
+                                    };
+                                    placeOtherLevelPallets(currentAllLevels, currentTargetShelf);
+                                }
+
+                                var topdownCanvas = document.getElementById('topdownCanvas');
+                                if (topdownCanvas) {
+                                    if (topdownAnimId) cancelAnimationFrame(topdownAnimId);
+                                    var parts = currentShelfId.split('-');
+                                    animateTopDown(topdownCanvas, info.occupied_slots, info.next_available, currentTargetShelf, parts[0], parts[1], [slotIndex]);
+                                }
+                            }
+                        });
+
+                    // Fire callback for real-time table updates
+                    if (typeof onStoredCallback === 'function') {
+                        onStoredCallback(data);
+                    }
+                });
+            })
+            .catch(function (err) {
+                console.error('Failed to store finished order:', err);
+                if (storeBtn) {
+                    storeBtn.disabled = false;
+                    storeBtn.textContent = 'Store Finished Order';
                 }
             });
         }

@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}Stremet — Warehouse Operator{% endblock %}</title>
+    <title>{% block title %}Stremet — Production Supervisor{% endblock %}</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -24,11 +24,11 @@
     <!-- Top Bar -->
     <header class="operator-topbar">
         <div class="operator-topbar-left">
-            <a href="{% url 'dashboard:operator_home' %}" class="operator-logo-link">
+            <a href="{% url 'dashboard:production_home' %}" class="operator-logo-link">
                 <img src="{% static 'images/Logo.png' %}" alt="Stremet" class="operator-logo-img">
             </a>
             <div class="operator-topbar-divider"></div>
-            <span class="operator-role-label">Warehouse Operator{% if current_warehouse %} · {{ current_warehouse.name }}{% endif %}</span>
+            <span class="operator-role-label">Production Supervisor</span>
         </div>
 
         <div class="operator-topbar-center">
@@ -61,25 +61,33 @@
         <div class="ui-panel" id="uiPanel">
             <!-- Sub Navigation -->
             <nav class="ui-sub-nav">
-                <a href="{% url 'dashboard:operator_dashboard' %}" class="ui-sub-nav-item {% if active_sub == 'dashboard' %}active{% endif %}">
+                <a href="{% url 'dashboard:production_dashboard' %}" class="ui-sub-nav-item {% if active_sub == 'dashboard' %}active{% endif %}">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
                     Dashboard
                 </a>
-                <a href="{% url 'dashboard:operator_delivery' %}" class="ui-sub-nav-item {% if active_sub == 'delivery' %}active{% endif %}">
+                <a href="{% url 'dashboard:production_orders' %}" class="ui-sub-nav-item {% if active_sub == 'orders' %}active{% endif %}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2"/><rect x="9" y="3" width="6" height="4" rx="1"/><path d="M9 14l2 2 4-4"/></svg>
+                    Orders
+                </a>
+                <a href="{% url 'dashboard:production_machines' %}" class="ui-sub-nav-item {% if active_sub == 'machines' %}active{% endif %}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 1v2"/><path d="M12 21v2"/><path d="M4.22 4.22l1.42 1.42"/><path d="M18.36 18.36l1.42 1.42"/><path d="M1 12h2"/><path d="M21 12h2"/><path d="M4.22 19.78l1.42-1.42"/><path d="M18.36 5.64l1.42-1.42"/></svg>
+                    Machines
+                </a>
+                <a href="{% url 'dashboard:production_pipeline' %}" class="ui-sub-nav-item {% if active_sub == 'pipeline' %}active{% endif %}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                    Pipeline
+                </a>
+                <a href="{% url 'dashboard:production_warehouses' %}" class="ui-sub-nav-item {% if active_sub == 'warehouses' %}active{% endif %}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+                    Warehouses
+                </a>
+                <a href="{% url 'dashboard:production_logs' %}" class="ui-sub-nav-item {% if active_sub == 'logs' %}active{% endif %}">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                    Logs
+                </a>
+                <a href="{% url 'dashboard:production_ready_delivery' %}" class="ui-sub-nav-item {% if active_sub == 'ready_delivery' %}active{% endif %}">
                     <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 18V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v11a1 1 0 0 0 1 1h2"/><path d="M15 18H9"/><path d="M19 18h2a1 1 0 0 0 1-1v-3.65a1 1 0 0 0-.22-.624l-3.48-4.35A1 1 0 0 0 17.52 8H14"/><circle cx="17" cy="18" r="2"/><circle cx="7" cy="18" r="2"/></svg>
                     Delivery
-                </a>
-                <a href="{% url 'dashboard:operator_materials' %}" class="ui-sub-nav-item {% if active_sub == 'materials' %}active{% endif %}">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
-                    Materials
-                </a>
-                <a href="{% url 'dashboard:operator_finished_goods' %}" class="ui-sub-nav-item {% if active_sub == 'finished_goods' %}active{% endif %}">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
-                    Finished Goods
-                </a>
-                <a href="{% url 'dashboard:operator_warehouse' %}" class="ui-sub-nav-item {% if active_sub == 'warehouse' %}active{% endif %}">
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-                    Warehouse
                 </a>
             </nav>
             <!-- UI Content Area -->
@@ -112,19 +120,19 @@
                         <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"/><path d="M18 14l1 3 3 1-3 1-1 3-1-3-3-1 3-1 1-3z" opacity="0.6"/></svg>
                     </div>
                     <h3 class="ai-chat-welcome-title">How can I help?</h3>
-                    <p class="ai-chat-welcome-desc">Your warehouse logistics assistant. Ask about deliveries, routes, capacity, or anything else.</p>
+                    <p class="ai-chat-welcome-desc">Your production operations assistant. Ask about orders, machines, quality, warehouses, or anything.</p>
                     <div class="ai-chat-suggestions">
-                        <button class="ai-chat-suggestion" data-msg="What should I do today? Give me a full briefing.">Daily Briefing</button>
-                        <button class="ai-chat-suggestion" data-msg="Plan my forklift route for pending deliveries">Forklift Route</button>
-                        <button class="ai-chat-suggestion" data-msg="Show me warehouse capacity forecast for this week">Capacity Forecast</button>
-                        <button class="ai-chat-suggestion" data-msg="Which deliveries should I process first?">Priority Queue</button>
+                        <button class="ai-chat-suggestion" data-msg="Give me a full production overview and daily briefing.">Production Overview</button>
+                        <button class="ai-chat-suggestion" data-msg="What's the fleet health status? Any machines need attention?">Fleet Health</button>
+                        <button class="ai-chat-suggestion" data-msg="Show me today's quality and defect report across all machines.">Quality Report</button>
+                        <button class="ai-chat-suggestion" data-msg="Full daily briefing — production, warehouse, and machine status.">Daily Briefing</button>
                     </div>
                 </div>
             </div>
 
             <div class="ai-chat-input-area">
                 <div class="ai-chat-input-wrapper">
-                    <textarea id="aiChatInput" placeholder="Ask your warehouse assistant..." rows="1"></textarea>
+                    <textarea id="aiChatInput" placeholder="Ask your production assistant..." rows="1"></textarea>
                     <button id="aiChatSend" class="ai-chat-send-btn" title="Send message">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
                     </button>

@@ -2,7 +2,7 @@ import json
 import random
 import uuid
 import datetime
-from datetime import date
+from datetime import date, datetime, timedelta
 from django.shortcuts import render, redirect
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
@@ -107,7 +107,7 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
     qs = ShelfSlot.objects.filter(shelf_id=shelf_id, is_occupied=True)
     if warehouse:
         qs = qs.filter(warehouse=warehouse)
-    slots = qs.select_related('delivery')
+    slots = qs.select_related('delivery', 'manufacturing_order')
     occupied_slots = sorted([s.slot_index for s in slots])
     occupied_count = len(occupied_slots)
     percentage = round(occupied_count / slots_per_shelf * 100) if slots_per_shelf > 0 else 0
@@ -116,9 +116,13 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
     # Track recently stored slots (within last 5 minutes)
     recent_cutoff = timezone.now() - datetime.timedelta(minutes=5)
     recently_stored = []
+    # Track finished goods slots (manufacturing_order set, not delivery)
+    finished_slots = []
     for s in slots:
         if s.stored_at and s.stored_at >= recent_cutoff:
             recently_stored.append(s.slot_index)
+        if s.manufacturing_order_id:
+            finished_slots.append(s.slot_index)
 
     return {
         'total_slots': slots_per_shelf,
@@ -127,6 +131,7 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
         'percentage': percentage,
         'next_available': available[0] if available else None,
         'recently_stored': recently_stored,
+        'finished_slots': finished_slots,
     }
 
 
@@ -153,7 +158,12 @@ def shelf_info(request):
     if len(parts) != 3:
         return JsonResponse({'error': 'Invalid shelf_id format. Use Sector-Unit-Shelf (e.g. 3-B-2)'}, status=400)
 
-    warehouse = _get_current_warehouse(request)
+    # Allow explicit warehouse_id param (for finished goods store flow)
+    wh_id = request.GET.get('warehouse_id')
+    if wh_id:
+        warehouse = Warehouse.objects.filter(id=int(wh_id)).first()
+    else:
+        warehouse = _get_current_warehouse(request)
     sector, unit, target_shelf = parts[0], parts[1], parts[2]
     cap = _get_shelf_capacity(shelf_id, warehouse)
 
@@ -238,6 +248,16 @@ def mark_stored(request):
         if warehouse:
             qs = qs.filter(warehouse=warehouse)
         delivery_obj = qs.first()
+
+    # Prevent over-storing: if delivery already has enough pallets stored, reject
+    if delivery_obj:
+        already_stored = ShelfSlot.objects.filter(delivery=delivery_obj, is_occupied=True).count()
+        try:
+            needed = int(''.join(c for c in delivery_obj.quantity if c.isdigit()))
+        except (ValueError, IndexError):
+            needed = 1
+        if already_stored >= needed:
+            return JsonResponse({'error': 'All pallets for this delivery are already stored'}, status=400)
 
     slot, _ = ShelfSlot.objects.update_or_create(
         shelf_id=shelf_id, slot_index=slot_index, warehouse=warehouse,
@@ -451,7 +471,12 @@ def add_delivery(request):
 @require_GET
 def warehouse_map(request):
     """Return occupancy data for every shelf in the warehouse."""
-    warehouse = _get_current_warehouse(request)
+    # Allow explicit warehouse_id param (for finished goods store flow)
+    wh_id = request.GET.get('warehouse_id')
+    if wh_id:
+        warehouse = Warehouse.objects.filter(id=int(wh_id)).first()
+    else:
+        warehouse = _get_current_warehouse(request)
     slot_qs = ShelfSlot.objects.filter(is_occupied=True)
     delivery_qs = Delivery.objects.filter(status='pending')
     if warehouse:
@@ -528,7 +553,12 @@ def warehouse_map(request):
             'cells': cell_list,
         }
 
-    return JsonResponse({'sectors': sectors, 'layout': layout})
+    return JsonResponse({
+        'sectors': sectors,
+        'layout': layout,
+        'shelves_per_unit': cfg['shelves_per_unit'],
+        'slots_per_shelf': cfg['slots_per_shelf'],
+    })
 
 
 @require_GET
@@ -963,29 +993,31 @@ def delivery(request):
     return render(request, 'dashboard/delivery.html', context)
 
 
-def manufacturing(request):
+def _get_manufacturing_context(request, all_warehouses=False):
+    """Build common manufacturing pipeline data (materials, deliveries, orders, scraps, machine specs)."""
     warehouse, wh_ctx = _warehouse_context(request)
     materials_list = list(
         Material.objects.values('id', 'name', 'category')
     )
     del_qs = Delivery.objects.filter(status='stored')
-    if warehouse:
+    if not all_warehouses and warehouse:
         del_qs = del_qs.filter(warehouse=warehouse)
     deliveries_list = list(
         del_qs.values('id', 'manufacturer', 'batch_id', 'size', 'quantity', 'shelf_id',
-                material_name=models.F('material__name'), material_id_ref=models.F('material__id'))
+                material_name=models.F('material__name'), material_id_ref=models.F('material__id'),
+                warehouse_name=models.F('warehouse__name'), warehouse_code=models.F('warehouse__code'))
     )
     for d in deliveries_list:
         d['material_name'] = d.pop('material_name', '') or ''
         d['material_id'] = d.pop('material_id_ref', None)
+        d['warehouse_name'] = d.pop('warehouse_name', '') or ''
+        d['warehouse_code'] = d.pop('warehouse_code', '') or ''
         try:
             d['qty_int'] = int(''.join(c for c in d['quantity'] if c.isdigit()))
         except (ValueError, IndexError):
             d['qty_int'] = 1
-    # Only include deliveries with available pallets
     deliveries_list = [d for d in deliveries_list if d['qty_int'] > 0]
 
-    # Load persisted manufacturing records
     saved_orders = list(ManufacturingOrder.objects.values(
         'order_id', 'product', 'dimensions', 'material_name', 'delivery_batch',
         'manufacturer', 'status', 'processing_time', 'total_energy', 'total_scrap',
@@ -995,7 +1027,6 @@ def manufacturing(request):
     for o in saved_orders:
         o['created_at'] = o['created_at'].strftime('%I:%M:%S %p') if o['created_at'] else ''
 
-    # Load recent scrap events
     saved_scraps = list(ScrapEvent.objects.select_related('order').values(
         'order__order_id', 'machine_name', 'machine_id', 'machine_index',
         'scrap_type', 'scrap_rate', 'material_name', 'delivery_batch', 'created_at',
@@ -1004,7 +1035,6 @@ def manufacturing(request):
         s['order_id'] = s.pop('order__order_id', '')
         s['created_at'] = s['created_at'].strftime('%I:%M:%S %p') if s['created_at'] else ''
 
-    # Build dynamic machine specs from DB
     _ensure_machine_records()
     health_machines = MachineHealth.objects.all().order_by('position')
     machine_specs = []
@@ -1027,13 +1057,19 @@ def manufacturing(request):
             'maintenanceLog': dd.get('maintenanceLog', []),
         })
 
-    context = {
-        'active_tab': 'manufacturing',
+    return {
         'materials_json': json.dumps(materials_list),
         'deliveries_json': json.dumps(deliveries_list),
         'saved_orders_json': json.dumps(saved_orders),
         'saved_scraps_json': json.dumps(saved_scraps),
         'machine_specs_json': json.dumps(machine_specs),
+    }
+
+
+def manufacturing(request):
+    context = {
+        'active_tab': 'manufacturing',
+        **_get_manufacturing_context(request),
     }
     return render(request, 'dashboard/manufacturing.html', context)
 
@@ -1165,6 +1201,69 @@ def consume_pallet(request):
 
     delivery.save()
     return JsonResponse({'success': True, 'remaining': new_qty})
+
+
+@require_POST
+def store_finished_order(request):
+    """Store a completed manufacturing order on a warehouse shelf slot."""
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON'}, status=400)
+
+    order_id = data.get('order_id', '')
+    warehouse_id = data.get('warehouse_id')
+    shelf_id = data.get('shelf_id', '')
+    slot_index = data.get('slot_index')
+
+    if not order_id or not warehouse_id or not shelf_id or slot_index is None:
+        return JsonResponse({'error': 'order_id, warehouse_id, shelf_id, and slot_index required'}, status=400)
+
+    try:
+        order = ManufacturingOrder.objects.get(order_id=order_id)
+    except ManufacturingOrder.DoesNotExist:
+        return JsonResponse({'error': 'Order not found'}, status=404)
+
+    try:
+        warehouse = Warehouse.objects.get(id=int(warehouse_id))
+    except Warehouse.DoesNotExist:
+        return JsonResponse({'error': 'Warehouse not found'}, status=404)
+
+    slot_index = int(slot_index)
+
+    # Create the shelf slot for the finished order
+    slot, _ = ShelfSlot.objects.update_or_create(
+        shelf_id=shelf_id, slot_index=slot_index, warehouse=warehouse,
+        defaults={
+            'is_occupied': True,
+            'manufacturing_order': order,
+            'delivery': None,
+            'stored_at': timezone.now(),
+        }
+    )
+
+    # Build detailed description with full traceability
+    desc_parts = [f'{order.product} placed on shelf {shelf_id} slot {slot_index} in {warehouse.name}']
+    if order.material_name:
+        desc_parts.append(f'Material: {order.material_name}')
+    if order.delivery_batch:
+        desc_parts.append(f'From batch: {order.delivery_batch}')
+    if order.manufacturer:
+        desc_parts.append(f'Supplier: {order.manufacturer}')
+    if order.delivery and order.delivery.warehouse:
+        desc_parts.append(f'Raw material was in: {order.delivery.warehouse.name} shelf {order.delivery.shelf_id}')
+    desc_parts.append(f'Quality: {order.quality}, Stages: {order.stages_completed}')
+    log_event('warehouse', 'info', f'Finished order stored: {order.order_id}',
+              ' | '.join(desc_parts),
+              manufacturing_order=order)
+
+    return JsonResponse({
+        'success': True,
+        'order_id': order.order_id,
+        'warehouse': warehouse.name,
+        'shelf_id': shelf_id,
+        'slot_index': slot_index,
+    })
 
 
 # =============================================
@@ -1986,6 +2085,8 @@ def profile_select(request):
         return redirect('dashboard:operator_home')
     elif role == 'maintenance_tech':
         return redirect('dashboard:maintenance_home')
+    elif role == 'production_supervisor':
+        return redirect('dashboard:production_home')
     return render(request, 'dashboard/profile_select.html')
 
 
@@ -1998,6 +2099,8 @@ def set_profile(request):
             return redirect('dashboard:operator_home')
         elif role == 'maintenance_tech':
             return redirect('dashboard:maintenance_home')
+        elif role == 'production_supervisor':
+            return redirect('dashboard:production_home')
     return redirect('dashboard:profile_select')
 
 
@@ -2174,6 +2277,40 @@ def operator_materials(request):
     return render(request, 'dashboard/operator/materials.html', context)
 
 
+def operator_finished_goods(request):
+    """Show completed manufacturing orders that need to be stored in warehouses."""
+    redir = _require_operator(request)
+    if redir:
+        return redir
+
+    # Orders ready to be stored (completed + PASS, not yet on a shelf)
+    stored_order_ids = ShelfSlot.objects.filter(
+        manufacturing_order__isnull=False, is_occupied=True
+    ).values_list('manufacturing_order_id', flat=True)
+
+    pending_orders = ManufacturingOrder.objects.filter(
+        status='completed', quality='PASS'
+    ).exclude(id__in=stored_order_ids).order_by('-created_at')
+
+    # Orders already stored as finished goods
+    stored_slots = ShelfSlot.objects.filter(
+        manufacturing_order__isnull=False, is_occupied=True
+    ).select_related('manufacturing_order', 'warehouse').order_by('-stored_at')
+
+    warehouses = Warehouse.objects.all().order_by('id')
+
+    context = {
+        'active_tab': 'finished_goods',
+        'active_sub': 'finished_goods',
+        'role': 'warehouse_operator',
+        'mode': 'ui',
+        'pending_orders': pending_orders,
+        'stored_slots': stored_slots,
+        'warehouses': warehouses,
+    }
+    return render(request, 'dashboard/operator/finished_goods.html', context)
+
+
 def operator_warehouse(request):
     redir = _require_operator(request)
     if redir:
@@ -2311,7 +2448,7 @@ def operator_warehouse_view(request, warehouse_id):
 # Maintenance Technician Views
 # =============================================
 
-def _compute_health(usage, threshold):
+def _compute_health_pct(usage, threshold):
     if threshold <= 0:
         return 0.0
     ratio = usage / threshold
@@ -2345,7 +2482,7 @@ def maintenance_dashboard(request):
     total_health = 0
     needs_attention = 0
     for m in machines:
-        h = _compute_health(m.usage_count, m.failure_threshold)
+        h = _compute_health_pct(m.usage_count, m.failure_threshold)
         total_health += h
         if h < 50:
             needs_attention += 1
@@ -2386,7 +2523,7 @@ def maintenance_machines(request):
     machines = MachineHealth.objects.all()
     machines_list = []
     for m in machines:
-        h = _compute_health(m.usage_count, m.failure_threshold)
+        h = _compute_health_pct(m.usage_count, m.failure_threshold)
         if h > 70:
             status = 'healthy'
         elif h > 40:
@@ -2439,9 +2576,15 @@ def maintenance_log_page(request):
     if mtype:
         entries = entries.filter(maintenance_type=mtype)
     if date_from:
-        entries = entries.filter(date__gte=date_from)
+        try:
+            entries = entries.filter(date__gte=datetime.strptime(date_from, '%Y-%m-%d').date())
+        except ValueError:
+            pass
     if date_to:
-        entries = entries.filter(date__lte=date_to)
+        try:
+            entries = entries.filter(date__lte=datetime.strptime(date_to, '%Y-%m-%d').date())
+        except ValueError:
+            pass
     machines = MachineHealth.objects.all().order_by('machine_name')
     context = {
         'active_tab': 'maintenance_log',
@@ -2519,7 +2662,7 @@ def api_create_maintenance_entry(request):
     except MachineHealth.DoesNotExist:
         return JsonResponse({'error': f'Machine {machine_id} not found'}, status=404)
     if not entry_date:
-        entry_date = date.today()
+        entry_date = timezone.localdate()
     entry = MaintenanceEntry.objects.create(
         machine=machine,
         date=entry_date,
@@ -2553,3 +2696,447 @@ def api_create_maintenance_entry(request):
             'next_scheduled': str(entry.next_scheduled) if entry.next_scheduled else None,
         },
     })
+
+
+# =============================================
+# Production Supervisor Views
+# =============================================
+
+def _require_production(request):
+    if request.session.get('selected_role') != 'production_supervisor':
+        return redirect('dashboard:profile_select')
+    return None
+
+
+def production_home(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    return render(request, 'dashboard/production/home.html', {
+        'active_tab': 'home',
+        'role': 'production_supervisor',
+    })
+
+
+def production_dashboard(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    today = date.today()
+
+    # Manufacturing stats
+    orders_today = ManufacturingOrder.objects.filter(created_at__date=today)
+    total_orders_today = orders_today.count()
+    completed_today = orders_today.filter(status='completed').count()
+    defected_today = orders_today.filter(status='defected').count()
+    defect_rate = round((defected_today / total_orders_today * 100), 1) if total_orders_today > 0 else 0
+    quality_pass = orders_today.filter(quality='PASS').count()
+    quality_fail = orders_today.filter(quality='FAIL').count()
+
+    # Machine stats
+    machines = MachineHealth.objects.all()
+    total_health = 0
+    needs_attention = 0
+    for m in machines:
+        h = _compute_health_pct(m.usage_count, m.failure_threshold)
+        total_health += h
+        if h < 50:
+            needs_attention += 1
+    avg_health = round(total_health / machines.count(), 1) if machines.count() > 0 else 0
+
+    # Scrap & warehouse
+    scrap_today = ScrapEvent.objects.filter(created_at__date=today).count()
+    pending_deliveries = Delivery.objects.filter(status='pending').count()
+    utilization = round(_overall_utilization() or 0, 1)
+
+    # Recent logs (all types)
+    recent_logs = GlobalLog.objects.order_by('-timestamp')[:15]
+
+    # 12-hour order timeline for chart
+    twelve_hours_ago = timezone.now() - timedelta(hours=12)
+    timeline_orders = ManufacturingOrder.objects.filter(
+        created_at__gte=twelve_hours_ago
+    ).order_by('created_at').values(
+        'order_id', 'product', 'status', 'quality',
+        'defect_machine', 'defect_type', 'created_at',
+    )[:100]
+    timeline_data = []
+    for o in timeline_orders:
+        # Find the related log ID for click-to-navigate
+        log = GlobalLog.objects.filter(
+            manufacturing_order__order_id=o['order_id']
+        ).order_by('-timestamp').values_list('id', flat=True).first()
+        timeline_data.append({
+            'order_id': o['order_id'],
+            'product': o['product'],
+            'status': o['status'],
+            'quality': o['quality'],
+            'defect_machine': o['defect_machine'] or '',
+            'defect_type': o['defect_type'] or '',
+            'created_at_iso': o['created_at'].isoformat(),
+            'log_id': log,
+        })
+
+    today_str = today.strftime('%A, %B %d, %Y')
+    context = {
+        'active_tab': 'dashboard',
+        'active_sub': 'dashboard',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'today': today_str,
+        'stats': {
+            'total_orders_today': total_orders_today,
+            'completed_today': completed_today,
+            'defected_today': defected_today,
+            'defect_rate': defect_rate,
+            'quality_pass': quality_pass,
+            'quality_fail': quality_fail,
+            'avg_health': avg_health,
+            'needs_attention': needs_attention,
+            'scrap_today': scrap_today,
+            'pending_deliveries': pending_deliveries,
+            'utilization': utilization,
+        },
+        'recent_logs': recent_logs,
+        'timeline_orders_json': json.dumps(timeline_data),
+    }
+    return render(request, 'dashboard/production/dashboard.html', context)
+
+
+def production_orders(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+
+    qs = ManufacturingOrder.objects.select_related(
+        'delivery', 'delivery__warehouse', 'delivery__material', 'material',
+    ).prefetch_related(
+        'scrap_events', 'logs',
+    ).order_by('-created_at')
+
+    # Filters
+    f_status = request.GET.get('status', '')
+    f_quality = request.GET.get('quality', '')
+    f_product = request.GET.get('product', '')
+    f_date_from = request.GET.get('date_from', '')
+    f_date_to = request.GET.get('date_to', '')
+
+    if f_status:
+        qs = qs.filter(status=f_status)
+    if f_quality:
+        qs = qs.filter(quality=f_quality)
+    if f_product:
+        qs = qs.filter(product__icontains=f_product)
+    if f_date_from:
+        qs = qs.filter(created_at__date__gte=f_date_from)
+    if f_date_to:
+        qs = qs.filter(created_at__date__lte=f_date_to)
+
+    orders_qs = qs[:200]
+
+    # Build enriched order list with full history
+    orders = []
+    for o in orders_qs:
+        # Delivery & warehouse origin
+        d = o.delivery
+        delivery_info = None
+        if d:
+            # Find shelf slots where this delivery's pallets were stored
+            stored_slots = list(ShelfSlot.objects.filter(
+                delivery=d, is_occupied=True
+            ).values_list('shelf_id', flat=True).distinct())
+            delivery_info = {
+                'batch_id': d.batch_id,
+                'manufacturer': d.manufacturer,
+                'date': d.date,
+                'quantity': d.quantity,
+                'shelf_id': d.shelf_id,
+                'status': d.status,
+                'warehouse_name': d.warehouse.name if d.warehouse else '—',
+                'warehouse_code': d.warehouse.code if d.warehouse else '—',
+                'material_name': d.material.name if d.material else d.manufacturer,
+                'stored_shelves': stored_slots,
+                'stored_at': d.created_at,
+            }
+
+        # Related logs (full event timeline for this order)
+        order_logs = list(o.logs.order_by('timestamp').values(
+            'timestamp', 'event_type', 'severity', 'title', 'description', 'id',
+        ))
+
+        # Delivery-related logs (when it was received & stored)
+        delivery_logs = []
+        if d:
+            delivery_logs = list(GlobalLog.objects.filter(
+                delivery=d
+            ).order_by('timestamp').values(
+                'timestamp', 'event_type', 'severity', 'title', 'description', 'id',
+            ))
+
+        # Scrap events
+        scraps = list(o.scrap_events.order_by('created_at').values(
+            'machine_name', 'machine_id', 'scrap_type', 'scrap_rate', 'created_at',
+        ))
+
+        # Stage data (machine-by-machine processing)
+        stage_data = o.stage_data or []
+        stage_timestamps = o.stage_timestamps or []
+
+        orders.append({
+            'order': o,
+            'delivery_info': delivery_info,
+            'order_logs': order_logs,
+            'delivery_logs': delivery_logs,
+            'scraps': scraps,
+            'stage_data': stage_data,
+            'stage_timestamps': stage_timestamps,
+            'timeline': sorted(delivery_logs + order_logs, key=lambda x: x['timestamp']),
+        })
+
+    context = {
+        'active_tab': 'orders',
+        'active_sub': 'orders',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'orders': orders,
+        'filter_status': f_status,
+        'filter_quality': f_quality,
+        'filter_product': f_product,
+        'filter_date_from': f_date_from,
+        'filter_date_to': f_date_to,
+    }
+    return render(request, 'dashboard/production/orders.html', context)
+
+
+def production_machines(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    _ensure_machine_records()
+    machines = MachineHealth.objects.all().order_by('position')
+    machines_data = []
+    for m in machines:
+        h = _compute_health_pct(m.usage_count, m.failure_threshold)
+        status = 'healthy' if h > 70 else 'warning' if h > 40 else 'maintenance' if h > 20 else 'critical'
+        defect_count = ManufacturingOrder.objects.filter(
+            defect_machine=m.machine_name, status='defected'
+        ).count()
+        scrap_count = ScrapEvent.objects.filter(machine_id=m.machine_id).count()
+        maintenance_entries = list(MaintenanceEntry.objects.filter(machine=m).order_by('-date')[:5])
+        machines_data.append({
+            'id': m.id,
+            'machine_id': m.machine_id,
+            'machine_name': m.machine_name,
+            'health_pct': h,
+            'usage_count': m.usage_count,
+            'failure_threshold': m.failure_threshold,
+            'last_maintenance': m.last_maintenance,
+            'status': status,
+            'position': m.position,
+            'detail_data': m.detail_data or {},
+            'maintenance_entries': maintenance_entries,
+            'defect_count': defect_count,
+            'scrap_count': scrap_count,
+        })
+    context = {
+        'active_tab': 'machines',
+        'active_sub': 'machines',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'machines': machines_data,
+    }
+    return render(request, 'dashboard/production/machines.html', context)
+
+
+def production_warehouses(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    warehouses = Warehouse.objects.all()
+    wh_data = []
+    for wh in warehouses:
+        util = round(_overall_utilization(warehouse=wh) or 0, 1)
+        pending = Delivery.objects.filter(warehouse=wh, status='pending').count()
+        stored = Delivery.objects.filter(warehouse=wh, status='stored').count()
+        wh_data.append({
+            'id': wh.id,
+            'name': wh.name,
+            'code': wh.code,
+            'width_m': wh.width_m,
+            'length_m': wh.length_m,
+            'height_m': wh.height_m,
+            'num_docks': wh.num_docks,
+            'layout_configured': wh.layout_configured,
+            'utilization': util,
+            'pending': pending,
+            'stored': stored,
+        })
+    context = {
+        'active_tab': 'warehouses',
+        'active_sub': 'warehouses',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'warehouses': wh_data,
+    }
+    return render(request, 'dashboard/production/warehouses.html', context)
+
+
+def production_logs(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+
+    qs = GlobalLog.objects.all().order_by('-timestamp')
+
+    f_event_type = request.GET.get('event_type', '')
+    f_severity = request.GET.get('severity', '')
+    f_search = request.GET.get('search', '')
+    f_date_from = request.GET.get('date_from', '')
+    f_date_to = request.GET.get('date_to', '')
+
+    if f_event_type:
+        qs = qs.filter(event_type=f_event_type)
+    if f_severity:
+        qs = qs.filter(severity=f_severity)
+    if f_search:
+        qs = qs.filter(
+            models.Q(title__icontains=f_search) | models.Q(description__icontains=f_search)
+        )
+    if f_date_from:
+        qs = qs.filter(timestamp__date__gte=f_date_from)
+    if f_date_to:
+        qs = qs.filter(timestamp__date__lte=f_date_to)
+
+    logs = qs[:200]
+
+    # Support highlight parameter for scroll-to-log
+    highlight_id = None
+    try:
+        highlight_id = int(request.GET.get('highlight', ''))
+    except (ValueError, TypeError):
+        pass
+
+    context = {
+        'active_tab': 'logs',
+        'active_sub': 'logs',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'logs': logs,
+        'highlight_id': highlight_id,
+        'filter_event_type': f_event_type,
+        'filter_severity': f_severity,
+        'filter_search': f_search,
+        'filter_date_from': f_date_from,
+        'filter_date_to': f_date_to,
+    }
+    return render(request, 'dashboard/production/logs.html', context)
+
+
+def production_ready_delivery(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+
+    orders_qs = ManufacturingOrder.objects.filter(
+        status='completed',
+        quality='PASS',
+    ).select_related(
+        'delivery', 'delivery__warehouse', 'delivery__material', 'material',
+    ).prefetch_related('scrap_events', 'logs').order_by('-created_at')
+
+    # Build enriched order list with full history (same as production_orders)
+    orders = []
+    for o in orders_qs:
+        d = o.delivery
+        delivery_info = None
+        if d:
+            stored_slots = list(ShelfSlot.objects.filter(
+                delivery=d, is_occupied=True
+            ).values_list('shelf_id', flat=True).distinct())
+            delivery_info = {
+                'batch_id': d.batch_id,
+                'manufacturer': d.manufacturer,
+                'date': d.date,
+                'quantity': d.quantity,
+                'shelf_id': d.shelf_id,
+                'status': d.status,
+                'warehouse_name': d.warehouse.name if d.warehouse else '\u2014',
+                'warehouse_code': d.warehouse.code if d.warehouse else '\u2014',
+                'material_name': d.material.name if d.material else d.manufacturer,
+                'stored_shelves': stored_slots,
+                'stored_at': d.created_at,
+            }
+        order_logs = list(o.logs.order_by('timestamp').values(
+            'timestamp', 'event_type', 'severity', 'title', 'description', 'id',
+        ))
+        delivery_logs = []
+        if d:
+            delivery_logs = list(GlobalLog.objects.filter(
+                delivery=d
+            ).order_by('timestamp').values(
+                'timestamp', 'event_type', 'severity', 'title', 'description', 'id',
+            ))
+        scraps = list(o.scrap_events.order_by('created_at').values(
+            'machine_name', 'machine_id', 'scrap_type', 'scrap_rate', 'created_at',
+        ))
+        # Check if already stored on a shelf as finished goods
+        stored_on_shelf = ShelfSlot.objects.filter(
+            manufacturing_order=o, is_occupied=True
+        ).select_related('warehouse').first()
+
+        orders.append({
+            'order': o,
+            'delivery_info': delivery_info,
+            'order_logs': order_logs,
+            'delivery_logs': delivery_logs,
+            'scraps': scraps,
+            'stage_data': o.stage_data or [],
+            'stage_timestamps': o.stage_timestamps or [],
+            'timeline': sorted(delivery_logs + order_logs, key=lambda x: x['timestamp']),
+            'stored_on_shelf': stored_on_shelf,
+        })
+
+    warehouses = Warehouse.objects.all().order_by('id')
+
+    context = {
+        'active_tab': 'ready_delivery',
+        'active_sub': 'ready_delivery',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'orders': orders,
+        'warehouses': warehouses,
+    }
+    return render(request, 'dashboard/production/ready_delivery.html', context)
+
+
+def production_warehouse_editor(request, warehouse_id):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    try:
+        wh = Warehouse.objects.get(id=warehouse_id)
+    except Warehouse.DoesNotExist:
+        from django.http import Http404
+        raise Http404
+    context = {
+        'active_tab': 'warehouses',
+        'active_sub': 'warehouses',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        'warehouse': wh,
+    }
+    return render(request, 'dashboard/production/warehouse_editor.html', context)
+
+
+def production_pipeline(request):
+    redir = _require_production(request)
+    if redir:
+        return redir
+    context = {
+        'active_tab': 'pipeline',
+        'active_sub': 'pipeline',
+        'role': 'production_supervisor',
+        'mode': 'ui',
+        **_get_manufacturing_context(request, all_warehouses=True),
+    }
+    return render(request, 'dashboard/production/pipeline.html', context)

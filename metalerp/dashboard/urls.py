@@ -13,6 +13,7 @@ urlpatterns = [
     path('operator/materials/', views.operator_materials, name='operator_materials'),
     path('operator/warehouse/', views.operator_warehouse, name='operator_warehouse'),
     path('operator/warehouse/<int:warehouse_id>/', views.operator_warehouse_view, name='operator_warehouse_view'),
+    path('operator/finished-goods/', views.operator_finished_goods, name='operator_finished_goods'),
     path('legacy/', views.index, name='index'),
     path('delivery/', views.delivery, name='delivery'),
     path('manufacturing/', views.manufacturing, name='manufacturing'),
@@ -28,6 +29,7 @@ urlpatterns = [
     path('api/deleted-deliveries/', views.deleted_deliveries, name='deleted_deliveries'),
     path('api/save-manufacturing-order/', views.save_manufacturing_order, name='save_manufacturing_order'),
     path('api/consume-pallet/', views.consume_pallet, name='consume_pallet'),
+    path('api/store-finished-order/', views.store_finished_order, name='store_finished_order'),
     # Logs
     path('logs/', views.logs, name='logs'),
     # Machine Health
@@ -60,6 +62,16 @@ urlpatterns = [
     path('maintenance/log/', views.maintenance_log_page, name='maintenance_log'),
     path('maintenance/logs/', views.maintenance_logs, name='maintenance_logs'),
     path('api/maintenance-entry/', views.api_create_maintenance_entry, name='api_create_maintenance_entry'),
+    # Production Supervisor
+    path('production/', views.production_home, name='production_home'),
+    path('production/dashboard/', views.production_dashboard, name='production_dashboard'),
+    path('production/orders/', views.production_orders, name='production_orders'),
+    path('production/machines/', views.production_machines, name='production_machines'),
+    path('production/warehouses/', views.production_warehouses, name='production_warehouses'),
+    path('production/logs/', views.production_logs, name='production_logs'),
+    path('production/ready-delivery/', views.production_ready_delivery, name='production_ready_delivery'),
+    path('production/warehouses/<int:warehouse_id>/editor/', views.production_warehouse_editor, name='production_warehouse_editor'),
+    path('production/pipeline/', views.production_pipeline, name='production_pipeline'),
     # AI Chat
     path('api/ai/chat/', ai_views.chat_stream, name='ai_chat'),
     path('api/ai/chat/history/', ai_views.chat_history, name='ai_chat_history'),

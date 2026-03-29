@@ -125,7 +125,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const formStatus = document.getElementById('formStatus');
 
     // Set default date to today
-    document.getElementById('formDate').value = new Date().toISOString().split('T')[0];
+    var now = new Date();
+    var localDate = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+    document.getElementById('formDate').value = localDate;
 
     newBtn.addEventListener('click', () => {
         form.style.display = form.style.display === 'none' ? 'block' : 'none';

@@ -211,6 +211,9 @@
                         item.innerHTML = '<span class="tool-dot"></span>' + escapeHtml(payload.name.replace(/_/g, ' '));
                         toolGroup.appendChild(item);
                         scrollToBottom();
+                    } else if (payload.type === 'ui_command') {
+                        // Dispatch a custom event for the pipeline page to handle
+                        document.dispatchEvent(new CustomEvent('pipeline_command', { detail: payload }));
                     } else if (payload.type === 'store_update') {
                         // Real-time update: mark delivery row as STORED in the table
                         var row = document.querySelector('tr[data-delivery-id="' + payload.delivery_id + '"]');

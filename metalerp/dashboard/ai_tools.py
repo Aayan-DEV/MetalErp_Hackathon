@@ -6,7 +6,7 @@ import json
 import math
 from datetime import datetime, date, timedelta
 from collections import defaultdict
-from django.db.models import Count, Sum, Q, F, Avg
+from django.db.models import Count, Sum, Q, F, Avg, Max
 from django.utils import timezone
 from .models import (
     Warehouse, Material, Delivery, ManufacturingOrder,
@@ -33,10 +33,11 @@ def _parse_date(value):
         return None
 
 
-def _to_json(data, max_chars=8000):
+def _to_json(data, max_chars=16000):
     raw = json.dumps(data, default=_serialize, ensure_ascii=False)
     if len(raw) > max_chars:
-        return raw[:max_chars] + '\n... (truncated)'
+        # Truncate but keep valid JSON by wrapping as a string with note
+        return json.dumps({"_note": "Response truncated", "data": raw[:max_chars - 100]}, ensure_ascii=False)
     return raw
 
 
@@ -519,6 +520,30 @@ WAREHOUSE_OPERATOR_TOOL_DEFINITIONS = [
             "required": [],
         },
     },
+    {
+        "name": "finished_goods_status",
+        "description": "Get the status of all finished manufactured goods — what has been stored, what is awaiting storage, and where each item is located. Shows full traceability: the original delivery, supplier, warehouse location, shelf, slot, and timeline of events.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "Optional: filter to a specific manufacturing order ID (e.g. WO-1001)"},
+                "status_filter": {"type": "string", "enum": ["all", "stored", "pending"], "description": "Filter: 'stored' (already on shelves), 'pending' (awaiting storage), or 'all' (default)"},
+                "warehouse_code": {"type": "string", "description": "Optional: filter stored goods by warehouse code"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "order_full_history",
+        "description": "Get the COMPLETE lifecycle history of a manufacturing order — full traceability from raw material delivery through production to finished goods storage. Shows: original delivery (supplier, batch, dock arrival, shelf location), material consumption, production pipeline (each machine stage, processing time, energy, scrap), quality result, defects, and final finished goods storage location. Every action is logged with timestamps.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "The manufacturing order ID (e.g. WO-1001). Required."},
+            },
+            "required": ["order_id"],
+        },
+    },
 ]
 
 
@@ -985,6 +1010,289 @@ def _store_delivery(params):
             {'step': 'confirm', 'result': 'Storage confirmed — all sensors green'},
         ],
     }
+
+
+def _finished_goods_status(params):
+    """Full finished goods status with traceability."""
+    order_id_filter = params.get('order_id')
+    status_filter = params.get('status_filter', 'all')
+    wh_code = params.get('warehouse_code')
+
+    # Orders already stored
+    stored_slots_qs = ShelfSlot.objects.filter(
+        manufacturing_order__isnull=False, is_occupied=True
+    ).select_related('manufacturing_order', 'manufacturing_order__delivery',
+                      'manufacturing_order__material', 'warehouse')
+    if order_id_filter:
+        stored_slots_qs = stored_slots_qs.filter(manufacturing_order__order_id=order_id_filter)
+    if wh_code:
+        stored_slots_qs = stored_slots_qs.filter(warehouse__code=wh_code)
+
+    stored_items = []
+    stored_order_ids = set()
+    for slot in stored_slots_qs.order_by('-stored_at')[:50]:
+        mo = slot.manufacturing_order
+        stored_order_ids.add(mo.id)
+        item = {
+            'order_id': mo.order_id,
+            'product': mo.product,
+            'material': mo.material_name or (mo.material.name if mo.material else '—'),
+            'dimensions': mo.dimensions,
+            'quality': mo.quality,
+            'status': 'stored',
+            'storage': {
+                'warehouse': slot.warehouse.name if slot.warehouse else '—',
+                'warehouse_code': slot.warehouse.code if slot.warehouse else '—',
+                'shelf_id': slot.shelf_id,
+                'slot_index': slot.slot_index,
+                'stored_at': slot.stored_at,
+            },
+        }
+        # Supply chain origin
+        if mo.delivery:
+            d = mo.delivery
+            item['supply_chain'] = {
+                'supplier': d.manufacturer,
+                'batch_id': d.batch_id,
+                'delivery_date': d.date,
+                'raw_material_size': d.size,
+                'quantity': d.quantity,
+                'delivery_warehouse': d.warehouse.name if d.warehouse else '—',
+                'delivery_shelf': d.shelf_id,
+                'delivery_status': d.status,
+            }
+        else:
+            item['supply_chain'] = {
+                'supplier': mo.manufacturer or '—',
+                'batch_id': mo.delivery_batch or '—',
+            }
+        # Production details
+        item['production'] = {
+            'processing_time_s': mo.processing_time,
+            'total_energy_kwh': mo.total_energy,
+            'total_scrap_pct': mo.total_scrap,
+            'stages_completed': mo.stages_completed,
+            'completed_at': mo.created_at,
+        }
+        if mo.quality == 'FAIL':
+            item['defect'] = {
+                'machine': mo.defect_machine,
+                'machine_id': mo.defect_machine_id,
+                'type': mo.defect_type,
+                'cause': mo.defect_cause,
+            }
+        stored_items.append(item)
+
+    # Orders awaiting storage (completed + PASS, not on any shelf)
+    pending_qs = ManufacturingOrder.objects.filter(
+        status='completed', quality='PASS'
+    ).exclude(id__in=stored_order_ids).select_related('delivery', 'delivery__warehouse', 'material')
+    if order_id_filter:
+        pending_qs = pending_qs.filter(order_id=order_id_filter)
+
+    pending_items = []
+    for mo in pending_qs.order_by('-created_at')[:50]:
+        item = {
+            'order_id': mo.order_id,
+            'product': mo.product,
+            'material': mo.material_name or (mo.material.name if mo.material else '—'),
+            'dimensions': mo.dimensions,
+            'quality': mo.quality,
+            'status': 'awaiting_storage',
+            'completed_at': mo.created_at,
+        }
+        if mo.delivery:
+            d = mo.delivery
+            item['supply_chain'] = {
+                'supplier': d.manufacturer,
+                'batch_id': d.batch_id,
+                'delivery_date': d.date,
+                'raw_material_size': d.size,
+                'quantity': d.quantity,
+                'delivery_warehouse': d.warehouse.name if d.warehouse else '—',
+                'delivery_shelf': d.shelf_id,
+            }
+        else:
+            item['supply_chain'] = {
+                'supplier': mo.manufacturer or '—',
+                'batch_id': mo.delivery_batch or '—',
+            }
+        item['production'] = {
+            'processing_time_s': mo.processing_time,
+            'total_energy_kwh': mo.total_energy,
+            'total_scrap_pct': mo.total_scrap,
+            'stages_completed': mo.stages_completed,
+        }
+        pending_items.append(item)
+
+    result = {
+        'total_stored': len(stored_items),
+        'total_pending': len(pending_items),
+    }
+    if status_filter in ('all', 'stored'):
+        result['stored'] = stored_items
+    if status_filter in ('all', 'pending'):
+        result['pending'] = pending_items
+    return result
+
+
+def _order_full_history(params):
+    """Complete lifecycle trace for a manufacturing order."""
+    order_id = params.get('order_id', '').strip()
+    if not order_id:
+        return {'error': 'order_id is required'}
+
+    try:
+        mo = ManufacturingOrder.objects.select_related(
+            'delivery', 'delivery__warehouse', 'delivery__material', 'material'
+        ).get(order_id=order_id)
+    except ManufacturingOrder.DoesNotExist:
+        return {'error': f'Order {order_id} not found'}
+
+    result = {
+        'order_id': mo.order_id,
+        'product': mo.product,
+        'dimensions': mo.dimensions,
+        'material': mo.material_name or (mo.material.name if mo.material else '—'),
+        'status': mo.status,
+        'quality': mo.quality,
+        'created_at': mo.created_at,
+    }
+
+    # ── 1. Supply Chain Origin ──
+    if mo.delivery:
+        d = mo.delivery
+        supply = {
+            'supplier': d.manufacturer,
+            'batch_id': d.batch_id,
+            'delivery_date': d.date,
+            'raw_material': d.material.name if d.material else '—',
+            'raw_material_size': d.size,
+            'quantity': d.quantity,
+            'delivery_warehouse': d.warehouse.name if d.warehouse else '—',
+            'delivery_warehouse_code': d.warehouse.code if d.warehouse else '—',
+            'assigned_shelf': d.shelf_id,
+            'delivery_status': d.status,
+            'delivery_created_at': d.created_at,
+        }
+        # Where was the raw material stored?
+        delivery_slots = ShelfSlot.objects.filter(
+            delivery=d, is_occupied=True
+        ).select_related('warehouse')
+        if delivery_slots.exists():
+            supply['stored_on_slots'] = [{
+                'warehouse': s.warehouse.name if s.warehouse else '—',
+                'shelf_id': s.shelf_id,
+                'slot_index': s.slot_index,
+                'stored_at': s.stored_at,
+            } for s in delivery_slots[:10]]
+        result['supply_chain'] = supply
+
+        # Delivery log events
+        delivery_logs = GlobalLog.objects.filter(delivery=d).order_by('timestamp')
+        result['delivery_events'] = [{
+            'timestamp': log.timestamp,
+            'event_type': log.event_type,
+            'severity': log.severity,
+            'title': log.title,
+            'description': log.description,
+        } for log in delivery_logs[:20]]
+    else:
+        result['supply_chain'] = {
+            'supplier': mo.manufacturer or '—',
+            'batch_id': mo.delivery_batch or '—',
+            'note': 'No linked delivery record',
+        }
+        result['delivery_events'] = []
+
+    # ── 2. Production Details ──
+    production = {
+        'processing_time_s': mo.processing_time,
+        'processing_time_readable': f'{mo.processing_time:.1f}s' if mo.processing_time else '—',
+        'total_energy_kwh': mo.total_energy,
+        'total_scrap_pct': mo.total_scrap,
+        'stages_completed': mo.stages_completed,
+    }
+    # Stage-by-stage breakdown — map stage index to machine name
+    if mo.stage_data:
+        machines = list(MachineHealth.objects.all().order_by('position').values('machine_id', 'machine_name'))
+        stages = []
+        timestamps = mo.stage_timestamps or []
+        for i, stage in enumerate(mo.stage_data):
+            machine_info = machines[i] if i < len(machines) else {}
+            s = {
+                'stage': i + 1,
+                'machine': machine_info.get('machine_name', '—'),
+                'machine_id': machine_info.get('machine_id', '—'),
+                'energy_kwh': stage.get('energy', 0),
+                'scrap_pct': stage.get('scrap', 0),
+                'scrap_type': stage.get('scrapType', '—'),
+            }
+            if i < len(timestamps):
+                s['timestamp'] = timestamps[i]
+            stages.append(s)
+        production['stages'] = stages
+    result['production'] = production
+
+    # ── 3. Defect Information ──
+    if mo.quality == 'FAIL' or mo.defect_type:
+        result['defect'] = {
+            'failed_at_machine': mo.defect_machine,
+            'machine_id': mo.defect_machine_id,
+            'defect_type': mo.defect_type,
+            'root_cause': mo.defect_cause,
+        }
+
+    # ── 4. Scrap Events ──
+    scraps = ScrapEvent.objects.filter(order=mo)
+    if scraps.exists():
+        result['scrap_events'] = [{
+            'machine': s.machine_name,
+            'machine_id': s.machine_id,
+            'scrap_type': s.scrap_type,
+            'scrap_rate_pct': s.scrap_rate,
+            'material': s.material_name,
+            'batch_id': s.delivery_batch,
+            'timestamp': s.created_at,
+        } for s in scraps[:20]]
+
+    # ── 5. Finished Goods Storage ──
+    finished_slots = ShelfSlot.objects.filter(
+        manufacturing_order=mo, is_occupied=True
+    ).select_related('warehouse')
+    if finished_slots.exists():
+        result['finished_goods_storage'] = {
+            'status': 'stored',
+            'locations': [{
+                'warehouse': s.warehouse.name if s.warehouse else '—',
+                'warehouse_code': s.warehouse.code if s.warehouse else '—',
+                'shelf_id': s.shelf_id,
+                'slot_index': s.slot_index,
+                'stored_at': s.stored_at,
+            } for s in finished_slots],
+        }
+    else:
+        if mo.status == 'completed' and mo.quality == 'PASS':
+            result['finished_goods_storage'] = {'status': 'awaiting_storage'}
+        else:
+            result['finished_goods_storage'] = {'status': 'not_applicable', 'reason': f'{mo.status}/{mo.quality}'}
+
+    # ── 6. Complete Event Timeline ──
+    all_logs = GlobalLog.objects.filter(
+        Q(manufacturing_order=mo) | Q(delivery=mo.delivery) if mo.delivery else Q(manufacturing_order=mo)
+    ).order_by('timestamp')
+    result['event_timeline'] = [{
+        'timestamp': log.timestamp,
+        'event_type': log.event_type,
+        'severity': log.severity,
+        'title': log.title,
+        'description': log.description,
+        'log_id': log.id,
+    } for log in all_logs[:50]]
+
+    result['total_events'] = all_logs.count()
+
+    return result
 
 
 # ── Maintenance Technician Tool Definitions ─────────────────────────────
@@ -1551,7 +1859,7 @@ def _create_maintenance_log(params):
     except MachineHealth.DoesNotExist:
         return {'error': f'Machine {machine_id} not found'}
 
-    entry_date = _parse_date(params.get('date')) or date.today()
+    entry_date = _parse_date(params.get('date')) or timezone.localdate()
     next_sched = _parse_date(params.get('next_scheduled'))
     entry = MaintenanceEntry.objects.create(
         machine=machine,
@@ -1946,9 +2254,13 @@ def _list_all_maintenance_entries(params):
     if v := params.get('maintenance_type'):
         qs = qs.filter(maintenance_type=v)
     if v := params.get('date_from'):
-        qs = qs.filter(date__gte=v)
+        parsed = _parse_date(v)
+        if parsed:
+            qs = qs.filter(date__gte=parsed)
     if v := params.get('date_to'):
-        qs = qs.filter(date__lte=v)
+        parsed = _parse_date(v)
+        if parsed:
+            qs = qs.filter(date__lte=parsed)
     limit = min(params.get('limit', 30), 100)
     rows = []
     for e in qs[:limit]:
@@ -2064,6 +2376,886 @@ def _delete_maintenance_log(params):
     }
 
 
+# ── Production Supervisor Tool Definitions ──────────────────────────────
+
+PRODUCTION_SUPERVISOR_TOOL_DEFINITIONS = [
+    {
+        "name": "production_overview",
+        "description": "Comprehensive production status: orders, completion rates, defect rates, throughput, bottleneck machines, quality metrics. Call this when the supervisor asks about production status or KPIs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date_from": {"type": "string", "description": "Start date YYYY-MM-DD (default: today)"},
+                "date_to": {"type": "string", "description": "End date YYYY-MM-DD (default: today)"},
+                "machine_id": {"type": "string", "description": "Filter by machine ID"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "supervisor_daily_briefing",
+        "description": "Combined cross-domain daily briefing: production metrics, machine health, warehouse status, alerts, and action items. The most comprehensive briefing tool — call this when the supervisor says hello, asks what's going on, or wants a full overview.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "warehouse_code": {"type": "string", "description": "Optional: filter warehouse data to a specific warehouse"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "manage_machine",
+        "description": "Add, edit, delete, or reorder machines in the pipeline. Use this when the supervisor wants to manage the machine fleet.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "delete", "edit", "reorder"], "description": "Action to perform"},
+                "machine_id": {"type": "string", "description": "Machine ID (required for delete, edit, reorder)"},
+                "machine_name": {"type": "string", "description": "Machine name (required for add, optional for edit)"},
+                "failure_threshold": {"type": "integer", "description": "Failure threshold (optional for add/edit, default 10)"},
+                "direction": {"type": "string", "enum": ["up", "down"], "description": "Direction to move machine (for reorder)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "manage_orders",
+        "description": "Search or update manufacturing order status. Use to find specific orders or change their status/quality.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["search", "update_status"], "description": "Action to perform"},
+                "order_id": {"type": "string", "description": "Order ID to look up or update"},
+                "status": {"type": "string", "enum": ["completed", "defected"], "description": "New status (for update_status)"},
+                "quality": {"type": "string", "enum": ["PASS", "FAIL"], "description": "New quality (for update_status)"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "production_analytics",
+        "description": "Production trends and KPI analytics: defect rates, throughput, scrap analysis, energy usage, quality metrics over time, grouped by machine/product/material.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "enum": ["defect_rate", "throughput", "scrap_rate", "energy", "quality"], "description": "Metric to analyze"},
+                "period": {"type": "string", "enum": ["today", "week", "month", "all"], "description": "Time period (default: today)"},
+                "group_by": {"type": "string", "enum": ["machine", "product", "material"], "description": "Group results by this field"},
+            },
+            "required": ["metric"],
+        },
+    },
+    {
+        "name": "emergency_response",
+        "description": "Quick actions for critical production issues: flag a machine, issue quality alert, or log a stop-line event. Creates a critical GlobalLog entry.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["flag_machine", "quality_alert", "stop_line"], "description": "Emergency action"},
+                "machine_id": {"type": "string", "description": "Machine ID (for flag_machine)"},
+                "reason": {"type": "string", "description": "Reason for the emergency action"},
+                "order_id": {"type": "string", "description": "Order ID (for quality_alert)"},
+            },
+            "required": ["action", "reason"],
+        },
+    },
+]
+
+
+# ── Pipeline UI Control Tool Definitions ────────────────────────────────
+
+PIPELINE_CONTROL_TOOL_DEFINITIONS = [
+    {
+        "name": "pipeline_list_orders",
+        "description": "List all queued work orders available for production on the pipeline. Shows orders that are ready to be started. Call this when the supervisor asks about pending/queued/standby orders or what can be produced.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "pipeline_start_production",
+        "description": "Start production of a specific work order on the 3D pipeline. The order moves through the machines in real-time on the UI. If no order_id is given, starts the next queued order. Call this when the supervisor says to produce an order, run production, start manufacturing, or make something.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "Specific work order ID to start (e.g. 'WO-1001'). If omitted, starts the next queued order."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "pipeline_start_all",
+        "description": "Start production of ALL queued orders sequentially. Each order begins as the previous one moves through. Call this when the supervisor says to produce all orders, run everything, or start all production.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "pipeline_set_speed",
+        "description": "Set the production simulation speed. Controls how fast orders move through the machines. Call this when the supervisor asks to speed up, slow down, or set a specific speed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "speed": {"type": "number", "description": "Speed multiplier: 0.5, 1, 2, or 5"},
+            },
+            "required": ["speed"],
+        },
+    },
+    {
+        "name": "pipeline_set_defect_rate",
+        "description": "Set the defect/error simulation rate percentage. Controls how likely products are to fail quality checks. Also enables error simulation if not already on. Call this when the supervisor says to set error rate, defect rate, failure rate, or quality threshold.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "rate": {"type": "integer", "description": "Defect rate percentage (5-100)"},
+            },
+            "required": ["rate"],
+        },
+    },
+    {
+        "name": "pipeline_toggle_errors",
+        "description": "Enable or disable error/defect simulation on the pipeline. When enabled, products can fail at machines based on the defect rate. Call this when the supervisor says to turn errors on/off, enable/disable defects, or toggle error simulation.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "description": "True to enable error simulation, false to disable"},
+            },
+            "required": ["enabled"],
+        },
+    },
+    {
+        "name": "pipeline_toggle_infinite",
+        "description": "Enable or disable infinite/auto-loop production mode. When enabled, new orders are automatically started as previous ones complete — the pipeline runs continuously. Call this when the supervisor says infinite mode, auto loop, continuous production, or keep running.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean", "description": "True to enable infinite/auto-loop mode, false to disable"},
+            },
+            "required": ["enabled"],
+        },
+    },
+    {
+        "name": "pipeline_pause_resume",
+        "description": "Pause or resume the production pipeline simulation. Call this when the supervisor says to pause, stop, hold, resume, continue, or unpause production.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["pause", "resume", "toggle"], "description": "Whether to pause, resume, or toggle"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "pipeline_status",
+        "description": "Get the current live status of the production pipeline: active products on the line, current speed, defect rate, infinite mode state, paused state, completed count, defect count. Call this when the supervisor asks about current pipeline state, what's running, or production status on the line.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "pipeline_get_completed",
+        "description": "Get the list of recently completed products from the current pipeline session, including their processing times, quality, and scrap data. Call this when the supervisor asks about completed products, finished orders, what's been made, or production output.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max results to return (default 10)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "pipeline_get_defects",
+        "description": "Get the list of defected products from the current pipeline session, including which machine failed, defect type, and root cause. Call this when the supervisor asks about defects, failures, rejected products, or quality issues on the line.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "description": "Max results to return (default 10)"},
+            },
+            "required": [],
+        },
+    },
+]
+
+
+# ── Pipeline Control Tool Execution ─────────────────────────────────────
+# These tools don't query the DB for live pipeline state — the pipeline runs
+# client-side in Three.js. Instead, they return a _ui_commands list that the
+# SSE stream emits as ui_command events for the frontend JS to execute.
+
+def _pipeline_list_orders(params):
+    """Return queued orders from DB deliveries (same source as pipeline JS)."""
+    deliveries = Delivery.objects.filter(status='stored').values(
+        'id', 'manufacturer', 'batch_id', 'size', 'quantity',
+        material_name=F('material__name'),
+        warehouse_name=F('warehouse__name'),
+    )[:30]
+    orders = []
+    counter = 1000
+    products = [
+        'HR Coil 2.5mm', 'CR Sheet 1.2mm', 'GP Sheet 0.5mm', 'GI Sheet 0.8mm',
+        'HR Plate 10mm', 'MS Angle 50x50', 'SS Sheet 1.5mm', 'TMT Bar Fe-500',
+        'Copper Strip 2mm', 'Aluminium Sheet 3mm', 'MS Flat 6mm', 'GI Pipe 25mm'
+    ]
+    idx = 0
+    for d in deliveries:
+        try:
+            qty = int(''.join(c for c in (d['quantity'] or '') if c.isdigit()))
+        except (ValueError, IndexError):
+            qty = 1
+        for _ in range(min(qty, 3)):
+            counter += 1
+            orders.append({
+                'order_id': f'WO-{counter}',
+                'product': products[idx % len(products)],
+                'material': d['material_name'] or 'Steel',
+                'batch': d['batch_id'] or '',
+                'manufacturer': d['manufacturer'] or 'Unknown',
+                'size': d['size'] or '',
+                'warehouse': d['warehouse_name'] or 'Unknown',
+            })
+            idx += 1
+            if idx >= 12:
+                break
+        if idx >= 12:
+            break
+
+    return {
+        'queued_orders': orders,
+        'total_queued': len(orders),
+        'note': 'These are the work orders available on the pipeline. Use pipeline_start_production to start one, or pipeline_start_all to run them all.',
+    }
+
+
+def _pipeline_start_production(params):
+    order_id = params.get('order_id', '')
+    cmd = {'command': 'start_production'}
+    if order_id:
+        cmd['order_id'] = order_id
+    return {
+        'status': 'started',
+        'order_id': order_id or '(next queued)',
+        'message': f'Production started for {order_id or "next queued order"}. Watch the 3D pipeline.',
+        '_ui_commands': [cmd],
+    }
+
+
+def _pipeline_start_all(params):
+    return {
+        'status': 'started',
+        'message': 'Starting all queued orders. The pipeline will process them sequentially.',
+        '_ui_commands': [{'command': 'start_all'}],
+    }
+
+
+def _pipeline_set_speed(params):
+    speed = params.get('speed', 2)
+    if speed not in [0.5, 1, 2, 5]:
+        speed = max(0.5, min(5, float(speed)))
+    return {
+        'status': 'updated',
+        'speed': speed,
+        'message': f'Pipeline speed set to {speed}x.',
+        '_ui_commands': [{'command': 'set_speed', 'value': speed}],
+    }
+
+
+def _pipeline_set_defect_rate(params):
+    rate = max(5, min(100, int(params.get('rate', 15))))
+    return {
+        'status': 'updated',
+        'defect_rate': rate,
+        'message': f'Defect rate set to {rate}%. Error simulation enabled.',
+        '_ui_commands': [
+            {'command': 'set_defect_rate', 'value': rate},
+            {'command': 'toggle_errors', 'value': True},
+        ],
+    }
+
+
+def _pipeline_toggle_errors(params):
+    enabled = params.get('enabled', True)
+    return {
+        'status': 'updated',
+        'error_simulation': enabled,
+        'message': f'Error simulation {"enabled" if enabled else "disabled"}.',
+        '_ui_commands': [{'command': 'toggle_errors', 'value': enabled}],
+    }
+
+
+def _pipeline_toggle_infinite(params):
+    enabled = params.get('enabled', True)
+    return {
+        'status': 'updated',
+        'infinite_mode': enabled,
+        'message': f'Infinite/auto-loop mode {"enabled — pipeline will run continuously" if enabled else "disabled"}.',
+        '_ui_commands': [{'command': 'toggle_infinite', 'value': enabled}],
+    }
+
+
+def _pipeline_pause_resume(params):
+    action = params.get('action', 'toggle')
+    return {
+        'status': action,
+        'message': f'Pipeline {"paused" if action == "pause" else "resumed" if action == "resume" else "toggled"}.',
+        '_ui_commands': [{'command': 'pause_resume', 'value': action}],
+    }
+
+
+def _pipeline_status(params):
+    """Return a request-for-status marker; real data comes from the frontend."""
+    return {
+        'message': 'Fetching live pipeline status from the 3D simulation...',
+        '_ui_commands': [{'command': 'get_status'}],
+    }
+
+
+def _pipeline_get_completed(params):
+    limit = params.get('limit', 10)
+    orders = ManufacturingOrder.objects.filter(
+        status='completed', quality='PASS'
+    ).order_by('-created_at')[:limit]
+    results = []
+    for o in orders:
+        results.append({
+            'order_id': o.order_id,
+            'product': o.product,
+            'material': o.material_name,
+            'manufacturer': o.manufacturer,
+            'processing_time': f'{o.processing_time:.1f}s',
+            'energy': f'{o.total_energy:.1f} kWh',
+            'scrap': f'{o.total_scrap:.2f}%',
+            'quality': o.quality,
+            'stages': o.stages_completed,
+            'created': o.created_at.strftime('%H:%M:%S') if o.created_at else '',
+        })
+    return {
+        'completed_products': results,
+        'total': len(results),
+    }
+
+
+def _pipeline_get_defects(params):
+    limit = params.get('limit', 10)
+    orders = ManufacturingOrder.objects.filter(
+        status='defected'
+    ).order_by('-created_at')[:limit]
+    results = []
+    for o in orders:
+        results.append({
+            'order_id': o.order_id,
+            'product': o.product,
+            'material': o.material_name,
+            'defect_machine': o.defect_machine,
+            'defect_type': o.defect_type,
+            'defect_cause': o.defect_cause,
+            'stages_completed': o.stages_completed,
+            'created': o.created_at.strftime('%H:%M:%S') if o.created_at else '',
+        })
+    return {
+        'defected_products': results,
+        'total': len(results),
+    }
+
+
+# ── Production Supervisor Tool Execution ────────────────────────────────
+
+def _production_overview(params):
+    today = date.today()
+    d_from = params.get('date_from', str(today))
+    d_to = params.get('date_to', str(today))
+
+    qs = ManufacturingOrder.objects.filter(
+        created_at__date__gte=d_from, created_at__date__lte=d_to
+    )
+    if params.get('machine_id'):
+        qs = qs.filter(defect_machine_id=params['machine_id'])
+
+    total = qs.count()
+    completed = qs.filter(status='completed').count()
+    defected = qs.filter(status='defected').count()
+    quality_pass = qs.filter(quality='PASS').count()
+    quality_fail = qs.filter(quality='FAIL').count()
+    defect_rate = round((defected / total * 100), 1) if total > 0 else 0
+
+    # Throughput
+    from django.db.models import Avg as _Avg, Sum as _Sum
+    agg = qs.aggregate(
+        avg_time=_Avg('processing_time'),
+        total_energy=_Sum('total_energy'),
+        avg_scrap=_Avg('total_scrap'),
+    )
+
+    # Bottleneck: machine with most defects
+    bottleneck = (
+        qs.filter(status='defected')
+        .values('defect_machine', 'defect_machine_id')
+        .annotate(count=Count('id'))
+        .order_by('-count')
+        .first()
+    )
+
+    # Per-machine breakdown
+    machine_breakdown = list(
+        qs.values('defect_machine', 'defect_machine_id')
+        .annotate(
+            total=Count('id'),
+            defects=Count('id', filter=Q(status='defected')),
+        )
+        .order_by('-defects')[:10]
+    )
+
+    return {
+        'period': f'{d_from} to {d_to}',
+        'total_orders': total,
+        'completed': completed,
+        'defected': defected,
+        'defect_rate_pct': defect_rate,
+        'quality_pass': quality_pass,
+        'quality_fail': quality_fail,
+        'avg_processing_time_s': round(agg['avg_time'] or 0, 1),
+        'total_energy_kwh': round(agg['total_energy'] or 0, 1),
+        'avg_scrap_pct': round(agg['avg_scrap'] or 0, 2),
+        'bottleneck_machine': {
+            'name': bottleneck['defect_machine'],
+            'id': bottleneck['defect_machine_id'],
+            'defect_count': bottleneck['count'],
+        } if bottleneck else None,
+        'machine_breakdown': machine_breakdown,
+    }
+
+
+def _supervisor_daily_briefing(params):
+    today = date.today()
+
+    # Production metrics
+    orders_today = ManufacturingOrder.objects.filter(created_at__date=today)
+    total_orders = orders_today.count()
+    completed = orders_today.filter(status='completed').count()
+    defected = orders_today.filter(status='defected').count()
+    quality_pass = orders_today.filter(quality='PASS').count()
+    quality_fail = orders_today.filter(quality='FAIL').count()
+    defect_rate = round((defected / total_orders * 100), 1) if total_orders > 0 else 0
+
+    # Machine health
+    machines = MachineHealth.objects.all()
+    from .views import _compute_health
+    machine_summary = []
+    total_health = 0
+    needs_attention = []
+    for m in machines:
+        h = _compute_health(m.usage_count, m.failure_threshold)
+        total_health += h
+        if h < 50:
+            needs_attention.append({'name': m.machine_name, 'id': m.machine_id, 'health': h})
+        machine_summary.append({'name': m.machine_name, 'id': m.machine_id, 'health': h})
+    avg_health = round(total_health / machines.count(), 1) if machines.count() > 0 else 0
+
+    # Warehouse metrics
+    wh_filter = {}
+    if v := params.get('warehouse_code'):
+        wh_filter['warehouse__code'] = v
+    pending_deliveries = Delivery.objects.filter(status='pending', **wh_filter).count()
+    stored_today = GlobalLog.objects.filter(
+        event_type='shipment', timestamp__date=today, **{k.replace('warehouse__code', 'description__icontains'): v for k, v in wh_filter.items()}
+    ).count() if not wh_filter else GlobalLog.objects.filter(event_type='shipment', timestamp__date=today).count()
+    from .views import _overall_utilization
+    utilization = round(_overall_utilization() or 0, 1)
+
+    # Scrap
+    scrap_today = ScrapEvent.objects.filter(created_at__date=today).count()
+
+    # Alerts: critical logs from today
+    critical_logs = list(
+        GlobalLog.objects.filter(
+            timestamp__date=today, severity__in=['critical', 'error']
+        ).values('title', 'severity', 'event_type')[:5]
+    )
+
+    return {
+        'date': str(today),
+        'production': {
+            'total_orders': total_orders,
+            'completed': completed,
+            'defected': defected,
+            'defect_rate_pct': defect_rate,
+            'quality_pass': quality_pass,
+            'quality_fail': quality_fail,
+        },
+        'machines': {
+            'fleet_avg_health': avg_health,
+            'total_machines': machines.count(),
+            'needs_attention': needs_attention,
+            'all_machines': sorted(machine_summary, key=lambda x: x['health']),
+        },
+        'warehouse': {
+            'pending_deliveries': pending_deliveries,
+            'stored_today': stored_today,
+            'utilization_pct': utilization,
+        },
+        'scrap_events_today': scrap_today,
+        'alerts': critical_logs,
+        'action_items': [],
+    }
+
+
+def _manage_machine(params):
+    action = params.get('action')
+
+    if action == 'add':
+        name = params.get('machine_name', '').strip()
+        if not name:
+            return {'error': 'machine_name is required for adding a machine'}
+        machine_id = params.get('machine_id', '').strip()
+        threshold = params.get('failure_threshold', 10)
+        if not machine_id:
+            import random as _rnd
+            prefix = ''.join(w[0].upper() for w in name.split()[:2]) or 'XX'
+            machine_id = f'MCH-{prefix}-{_rnd.randint(10,99):02d}'
+        if MachineHealth.objects.filter(machine_id=machine_id).exists():
+            return {'error': f'Machine {machine_id} already exists'}
+        max_pos = MachineHealth.objects.aggregate(m=Max('position'))['m']
+        position = (max_pos or 0) + 1
+        from .views import _generate_random_machine_detail
+        detail = _generate_random_machine_detail(name)
+        m = MachineHealth.objects.create(
+            machine_id=machine_id,
+            machine_name=name,
+            failure_threshold=threshold,
+            position=position,
+            detail_data=detail,
+        )
+        GlobalLog.objects.create(
+            event_type='machine', severity='info',
+            title=f'Machine added: {name} ({machine_id})',
+            description=f'Threshold: {threshold}, Position: {position}',
+            machine=m,
+        )
+        return {
+            'success': True,
+            'machine_id': machine_id,
+            'machine_name': name,
+            'failure_threshold': threshold,
+            'position': position,
+            'message': f'Machine "{name}" ({machine_id}) added to pipeline at position {position}',
+        }
+
+    elif action == 'delete':
+        machine_id = params.get('machine_id', '').strip()
+        if not machine_id:
+            return {'error': 'machine_id is required for deleting'}
+        try:
+            m = MachineHealth.objects.get(machine_id=machine_id)
+        except MachineHealth.DoesNotExist:
+            return {'error': f'Machine {machine_id} not found'}
+        name = m.machine_name
+        m.delete()
+        GlobalLog.objects.create(
+            event_type='machine', severity='warning',
+            title=f'Machine deleted: {name} ({machine_id})',
+        )
+        return {'success': True, 'message': f'Machine "{name}" ({machine_id}) deleted'}
+
+    elif action == 'edit':
+        machine_id = params.get('machine_id', '').strip()
+        if not machine_id:
+            return {'error': 'machine_id is required for editing'}
+        try:
+            m = MachineHealth.objects.get(machine_id=machine_id)
+        except MachineHealth.DoesNotExist:
+            return {'error': f'Machine {machine_id} not found'}
+        changes = []
+        if params.get('machine_name'):
+            m.machine_name = params['machine_name']
+            changes.append(f'name → {m.machine_name}')
+        if params.get('failure_threshold'):
+            m.failure_threshold = int(params['failure_threshold'])
+            changes.append(f'threshold → {m.failure_threshold}')
+        m.save()
+        if changes:
+            GlobalLog.objects.create(
+                event_type='machine', severity='info',
+                title=f'Machine edited: {m.machine_name} ({machine_id})',
+                description=', '.join(changes),
+                machine=m,
+            )
+        return {
+            'success': True,
+            'machine_id': machine_id,
+            'changes': changes,
+            'message': f'Machine {machine_id} updated: {", ".join(changes)}' if changes else 'No changes',
+        }
+
+    elif action == 'reorder':
+        machine_id = params.get('machine_id', '').strip()
+        direction = params.get('direction', 'down')
+        if not machine_id:
+            return {'error': 'machine_id is required for reordering'}
+        try:
+            m = MachineHealth.objects.get(machine_id=machine_id)
+        except MachineHealth.DoesNotExist:
+            return {'error': f'Machine {machine_id} not found'}
+        if direction == 'up':
+            swap = MachineHealth.objects.filter(position__lt=m.position).order_by('-position').first()
+        else:
+            swap = MachineHealth.objects.filter(position__gt=m.position).order_by('position').first()
+        if not swap:
+            return {'error': f'Cannot move {machine_id} {direction} — already at the edge'}
+        m.position, swap.position = swap.position, m.position
+        m.save(update_fields=['position'])
+        swap.save(update_fields=['position'])
+        return {
+            'success': True,
+            'message': f'Moved {m.machine_name} {direction} (swapped with {swap.machine_name})',
+        }
+
+    return {'error': f'Unknown action: {action}'}
+
+
+def _manage_orders(params):
+    action = params.get('action')
+
+    if action == 'search':
+        order_id = params.get('order_id', '').strip()
+        if not order_id:
+            return {'error': 'order_id is required for search'}
+        try:
+            o = ManufacturingOrder.objects.get(order_id=order_id)
+        except ManufacturingOrder.DoesNotExist:
+            return {'error': f'Order {order_id} not found'}
+        return {
+            'order_id': o.order_id,
+            'product': o.product,
+            'dimensions': o.dimensions,
+            'material': o.material_name,
+            'manufacturer': o.manufacturer,
+            'delivery_batch': o.delivery_batch,
+            'status': o.status,
+            'quality': o.quality,
+            'processing_time': o.processing_time,
+            'total_energy': o.total_energy,
+            'total_scrap': o.total_scrap,
+            'stages_completed': o.stages_completed,
+            'defect_machine': o.defect_machine,
+            'defect_type': o.defect_type,
+            'defect_cause': o.defect_cause,
+            'stage_data': o.stage_data,
+            'created_at': str(o.created_at),
+        }
+
+    elif action == 'update_status':
+        order_id = params.get('order_id', '').strip()
+        if not order_id:
+            return {'error': 'order_id is required'}
+        try:
+            o = ManufacturingOrder.objects.get(order_id=order_id)
+        except ManufacturingOrder.DoesNotExist:
+            return {'error': f'Order {order_id} not found'}
+        changes = []
+        if params.get('status'):
+            o.status = params['status']
+            changes.append(f'status → {o.status}')
+        if params.get('quality'):
+            o.quality = params['quality']
+            changes.append(f'quality → {o.quality}')
+        o.save()
+        if changes:
+            GlobalLog.objects.create(
+                event_type='manufacturing', severity='info',
+                title=f'Order updated: {order_id}',
+                description=', '.join(changes),
+                manufacturing_order=o,
+            )
+        return {
+            'success': True,
+            'order_id': order_id,
+            'changes': changes,
+            'message': f'Order {order_id} updated: {", ".join(changes)}' if changes else 'No changes',
+        }
+
+    return {'error': f'Unknown action: {action}'}
+
+
+def _production_analytics(params):
+    metric = params.get('metric', 'defect_rate')
+    period = params.get('period', 'today')
+    group_by = params.get('group_by')
+
+    today = date.today()
+    if period == 'today':
+        d_from = today
+    elif period == 'week':
+        d_from = today - timedelta(days=7)
+    elif period == 'month':
+        d_from = today - timedelta(days=30)
+    else:
+        d_from = date(2020, 1, 1)
+
+    qs = ManufacturingOrder.objects.filter(created_at__date__gte=d_from, created_at__date__lte=today)
+
+    # Determine grouping field
+    group_field = None
+    if group_by == 'machine':
+        group_field = 'defect_machine'
+    elif group_by == 'product':
+        group_field = 'product'
+    elif group_by == 'material':
+        group_field = 'material_name'
+
+    if metric == 'defect_rate':
+        if group_field:
+            data = list(
+                qs.values(group_field)
+                .annotate(total=Count('id'), defects=Count('id', filter=Q(status='defected')))
+                .order_by('-defects')
+            )
+            for d in data:
+                d['defect_rate_pct'] = round((d['defects'] / d['total'] * 100), 1) if d['total'] > 0 else 0
+        else:
+            total = qs.count()
+            defects = qs.filter(status='defected').count()
+            data = {'total': total, 'defects': defects, 'defect_rate_pct': round((defects / total * 100), 1) if total > 0 else 0}
+
+    elif metric == 'throughput':
+        if group_field:
+            data = list(
+                qs.values(group_field)
+                .annotate(total=Count('id'), avg_time=Avg('processing_time'))
+                .order_by('-total')
+            )
+            for d in data:
+                d['avg_time'] = round(d['avg_time'] or 0, 1)
+        else:
+            total = qs.count()
+            days = max((today - d_from).days, 1)
+            avg_time = qs.aggregate(a=Avg('processing_time'))['a']
+            data = {'total_orders': total, 'orders_per_day': round(total / days, 1), 'avg_processing_time_s': round(avg_time or 0, 1)}
+
+    elif metric == 'scrap_rate':
+        scrap_qs = ScrapEvent.objects.filter(created_at__date__gte=d_from, created_at__date__lte=today)
+        if group_field == 'defect_machine':
+            data = list(
+                scrap_qs.values('machine_name', 'machine_id')
+                .annotate(count=Count('id'), avg_rate=Avg('scrap_rate'))
+                .order_by('-count')
+            )
+            for d in data:
+                d['avg_rate'] = round(d['avg_rate'] or 0, 2)
+        else:
+            data = {
+                'total_scrap_events': scrap_qs.count(),
+                'avg_scrap_rate': round(scrap_qs.aggregate(a=Avg('scrap_rate'))['a'] or 0, 2),
+                'by_type': list(scrap_qs.values('scrap_type').annotate(count=Count('id')).order_by('-count')[:10]),
+            }
+
+    elif metric == 'energy':
+        if group_field:
+            data = list(
+                qs.values(group_field)
+                .annotate(total_energy=Sum('total_energy'), avg_energy=Avg('total_energy'), count=Count('id'))
+                .order_by('-total_energy')
+            )
+            for d in data:
+                d['total_energy'] = round(d['total_energy'] or 0, 1)
+                d['avg_energy'] = round(d['avg_energy'] or 0, 1)
+        else:
+            agg = qs.aggregate(total=Sum('total_energy'), avg=Avg('total_energy'))
+            data = {'total_energy_kwh': round(agg['total'] or 0, 1), 'avg_energy_kwh': round(agg['avg'] or 0, 1), 'order_count': qs.count()}
+
+    elif metric == 'quality':
+        if group_field:
+            data = list(
+                qs.values(group_field)
+                .annotate(total=Count('id'), passed=Count('id', filter=Q(quality='PASS')), failed=Count('id', filter=Q(quality='FAIL')))
+                .order_by('-failed')
+            )
+            for d in data:
+                d['pass_rate_pct'] = round((d['passed'] / d['total'] * 100), 1) if d['total'] > 0 else 0
+        else:
+            total = qs.count()
+            passed = qs.filter(quality='PASS').count()
+            failed = qs.filter(quality='FAIL').count()
+            data = {'total': total, 'passed': passed, 'failed': failed, 'pass_rate_pct': round((passed / total * 100), 1) if total > 0 else 0}
+
+    else:
+        return {'error': f'Unknown metric: {metric}'}
+
+    return {
+        'metric': metric,
+        'period': period,
+        'group_by': group_by,
+        'date_range': f'{d_from} to {today}',
+        'data': data,
+    }
+
+
+def _emergency_response(params):
+    action = params.get('action')
+    reason = params.get('reason', 'No reason provided')
+
+    if action == 'flag_machine':
+        machine_id = params.get('machine_id', '').strip()
+        if not machine_id:
+            return {'error': 'machine_id is required'}
+        try:
+            m = MachineHealth.objects.get(machine_id=machine_id)
+        except MachineHealth.DoesNotExist:
+            return {'error': f'Machine {machine_id} not found'}
+        GlobalLog.objects.create(
+            event_type='machine', severity='critical',
+            title=f'MACHINE FLAGGED: {m.machine_name} ({machine_id})',
+            description=f'Reason: {reason}',
+            machine=m,
+        )
+        return {
+            'success': True,
+            'action': 'flag_machine',
+            'machine': m.machine_name,
+            'machine_id': machine_id,
+            'message': f'Machine {m.machine_name} ({machine_id}) flagged as critical. Reason: {reason}',
+        }
+
+    elif action == 'quality_alert':
+        order_id = params.get('order_id', '').strip()
+        order = None
+        if order_id:
+            try:
+                order = ManufacturingOrder.objects.get(order_id=order_id)
+            except ManufacturingOrder.DoesNotExist:
+                pass
+        GlobalLog.objects.create(
+            event_type='manufacturing', severity='critical',
+            title=f'QUALITY ALERT: {reason}',
+            description=f'Order: {order_id or "N/A"}. Alert raised by production supervisor.',
+            manufacturing_order=order,
+        )
+        return {
+            'success': True,
+            'action': 'quality_alert',
+            'order_id': order_id,
+            'message': f'Quality alert issued. Reason: {reason}',
+        }
+
+    elif action == 'stop_line':
+        GlobalLog.objects.create(
+            event_type='manufacturing', severity='critical',
+            title=f'PRODUCTION LINE STOP',
+            description=f'Stop issued by supervisor. Reason: {reason}',
+        )
+        return {
+            'success': True,
+            'action': 'stop_line',
+            'message': f'Production line stop logged. Reason: {reason}. All relevant personnel should be notified.',
+        }
+
+    return {'error': f'Unknown emergency action: {action}'}
+
+
 # ── Dispatcher ──────────────────────────────────────────────────────────
 
 _TOOL_MAP = {
@@ -2082,6 +3274,8 @@ _TOOL_MAP = {
     'priority_queue': _priority_queue,
     'anomaly_detection': _anomaly_detection,
     'store_delivery': _store_delivery,
+    'finished_goods_status': _finished_goods_status,
+    'order_full_history': _order_full_history,
     'machine_fleet_status': _machine_fleet_status,
     'maintenance_schedule': _maintenance_schedule,
     'defect_correlation': _defect_correlation,
@@ -2100,6 +3294,23 @@ _TOOL_MAP = {
     'list_all_maintenance_entries': _list_all_maintenance_entries,
     'edit_maintenance_log': _edit_maintenance_log,
     'delete_maintenance_log': _delete_maintenance_log,
+    'production_overview': _production_overview,
+    'supervisor_daily_briefing': _supervisor_daily_briefing,
+    'manage_machine': _manage_machine,
+    'manage_orders': _manage_orders,
+    'production_analytics': _production_analytics,
+    'emergency_response': _emergency_response,
+    'pipeline_list_orders': _pipeline_list_orders,
+    'pipeline_start_production': _pipeline_start_production,
+    'pipeline_start_all': _pipeline_start_all,
+    'pipeline_set_speed': _pipeline_set_speed,
+    'pipeline_set_defect_rate': _pipeline_set_defect_rate,
+    'pipeline_toggle_errors': _pipeline_toggle_errors,
+    'pipeline_toggle_infinite': _pipeline_toggle_infinite,
+    'pipeline_pause_resume': _pipeline_pause_resume,
+    'pipeline_status': _pipeline_status,
+    'pipeline_get_completed': _pipeline_get_completed,
+    'pipeline_get_defects': _pipeline_get_defects,
 }
 
 # Tools relevant for the warehouse operator role
@@ -2113,6 +3324,20 @@ MAINTENANCE_TECH_TOOLS = [
     t for t in TOOL_DEFINITIONS
     if t['name'] in ('get_machine_health', 'search_manufacturing_orders', 'get_scrap_events', 'search_logs', 'get_dashboard_summary')
 ] + MAINTENANCE_TECH_TOOL_DEFINITIONS
+
+# Tools relevant for the production supervisor role (superset — most powerful)
+PRODUCTION_SUPERVISOR_TOOLS = TOOL_DEFINITIONS + [
+    t for t in WAREHOUSE_OPERATOR_TOOL_DEFINITIONS
+    if t['name'] in ('daily_briefing', 'capacity_forecast', 'anomaly_detection', 'store_delivery',
+                      'finished_goods_status', 'order_full_history')
+] + [
+    t for t in MAINTENANCE_TECH_TOOL_DEFINITIONS
+    if t['name'] in ('machine_fleet_status', 'maintenance_schedule', 'defect_correlation',
+                      'scrap_analysis', 'machine_history', 'predictive_maintenance',
+                      'health_trend', 'get_equipment_details', 'get_todays_summary',
+                      'create_maintenance_log', 'reset_machine', 'update_failure_threshold',
+                      'update_equipment_info')
+] + PRODUCTION_SUPERVISOR_TOOL_DEFINITIONS + PIPELINE_CONTROL_TOOL_DEFINITIONS
 
 
 def execute_tool(tool_name: str, tool_input: dict) -> str:
