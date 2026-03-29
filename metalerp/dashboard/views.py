@@ -114,7 +114,7 @@ def _get_shelf_capacity(shelf_id, warehouse=None):
     available = [i for i in range(slots_per_shelf) if i not in occupied_slots]
 
     # Track recently stored slots (within last 5 minutes)
-    recent_cutoff = timezone.now() - datetime.timedelta(minutes=5)
+    recent_cutoff = timezone.now() - timedelta(minutes=5)
     recently_stored = []
     # Track finished goods slots (manufacturing_order set, not delivery)
     finished_slots = []
@@ -1562,7 +1562,7 @@ def _generate_random_machine_detail(machine_name):
     now = timezone.now()
     # Random purchase date 1-5 years ago
     days_ago = random.randint(365, 365 * 5)
-    purchase_date = (now - datetime.timedelta(days=days_ago)).date()
+    purchase_date = (now - timedelta(days=days_ago)).date()
 
     # Random parts changed
     num_parts = random.randint(0, 3)
@@ -1578,7 +1578,7 @@ def _generate_random_machine_detail(machine_name):
     maintenance_log = []
     for tmpl in maint_templates:
         log_days_ago = random.randint(30, days_ago)
-        log_date = (now - datetime.timedelta(days=log_days_ago)).strftime('%Y-%m-%d')
+        log_date = (now - timedelta(days=log_days_ago)).strftime('%Y-%m-%d')
         cost = random.randint(tmpl['cost_range'][0], tmpl['cost_range'][1])
         maintenance_log.append({
             'date': log_date,
@@ -1929,8 +1929,8 @@ def logs(request):
             try:
                 center = datetime.datetime.fromisoformat(around)
                 qs = qs.filter(
-                    timestamp__gte=center - datetime.timedelta(hours=2),
-                    timestamp__lte=center + datetime.timedelta(hours=2),
+                    timestamp__gte=center - timedelta(hours=2),
+                    timestamp__lte=center + timedelta(hours=2),
                 )
             except (ValueError, TypeError):
                 pass
