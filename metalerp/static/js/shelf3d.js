@@ -40,13 +40,15 @@
     var SLOTS_PER_SHELF = ROWS_PER_SHELF * COLS; // 4
 
     function updateShelfConfig(data) {
-        if (data.shelves_per_unit && data.shelves_per_unit !== NUM_SHELVES) {
+        if (data.shelves_per_unit && data.shelves_per_unit > 0) {
             NUM_SHELVES = data.shelves_per_unit;
             SHELF_HEIGHT = NUM_SHELVES * LEVEL_HEIGHT;
         }
-        if (data.slots_per_shelf && data.slots_per_shelf !== COLS) {
+        if (data.slots_per_shelf && data.slots_per_shelf > 0) {
             COLS = data.slots_per_shelf;
             SLOTS_PER_SHELF = ROWS_PER_SHELF * COLS;
+            // Scale pallet width to fit the shelf
+            PALLET_W = Math.min(2.0, (SHELF_WIDTH - 2 * GAP - 2 * UPRIGHT_WIDTH) / COLS - GAP);
         }
     }
     // Steel sheets: wide, very thin, deep — single row fills depth
@@ -228,8 +230,9 @@
 
     function placeOtherLevelPallets(allLevels, targetShelf) {
         if (!allLevels) return;
-        var startX = -SHELF_WIDTH / 2 + PALLET_W / 2 + GAP + UPRIGHT_WIDTH;
-        var stepX = (SHELF_WIDTH - PALLET_W - 2 * GAP - 2 * UPRIGHT_WIDTH) / (COLS - 1);
+        var usableW = SHELF_WIDTH - 2 * GAP - 2 * UPRIGHT_WIDTH;
+        var stepX = COLS > 1 ? usableW / COLS : 0;
+        var startX = COLS > 1 ? -usableW / 2 + stepX / 2 : 0;
         var palletDepth = PALLET_D * 0.85;
         var otherPalletColor = 0x999999;
         var otherRecentColor = 0x4a9eff;
@@ -274,8 +277,9 @@
 
     function placePallets(occupiedSlots, nextAvailable, targetShelf, recentlyStored) {
         slotMeshes = [];
-        var startX = -SHELF_WIDTH / 2 + PALLET_W / 2 + GAP + UPRIGHT_WIDTH;
-        var stepX = (SHELF_WIDTH - PALLET_W - 2 * GAP - 2 * UPRIGHT_WIDTH) / (COLS - 1);
+        var usableW = SHELF_WIDTH - 2 * GAP - 2 * UPRIGHT_WIDTH;
+        var stepX = COLS > 1 ? usableW / COLS : 0;
+        var startX = COLS > 1 ? -usableW / 2 + stepX / 2 : 0;
         var baseShelfY = (targetShelf - 1) * LEVEL_HEIGHT + SHELF_THICKNESS;
         var recentSlots = recentlyStored || [];
 
@@ -412,8 +416,9 @@
         var offsetX = (w - gridW) / 2;
         var offsetY = gridTop;
 
-        // Display columns left to right: C1, C2, C3, C4
-        var displayOrder = [0, 1, 2, 3];
+        // Display columns left to right: C1, C2, ..., CN (dynamic)
+        var displayOrder = [];
+        for (var di = 0; di < COLS; di++) displayOrder.push(di);
 
         for (var vi = 0; vi < COLS; vi++) {
             var slotIndex = displayOrder[vi];
@@ -547,8 +552,9 @@
         });
         slotMeshes = [];
 
-        var startX = -SHELF_WIDTH / 2 + PALLET_W / 2 + GAP + UPRIGHT_WIDTH;
-        var stepX = (SHELF_WIDTH - PALLET_W - 2 * GAP - 2 * UPRIGHT_WIDTH) / (COLS - 1);
+        var usableW = SHELF_WIDTH - 2 * GAP - 2 * UPRIGHT_WIDTH;
+        var stepX = COLS > 1 ? usableW / COLS : 0;
+        var startX = COLS > 1 ? -usableW / 2 + stepX / 2 : 0;
         var baseShelfY = (targetShelf - 1) * LEVEL_HEIGHT + SHELF_THICKNESS;
         var palletDepth = PALLET_D * 0.85;
 
@@ -966,10 +972,10 @@
                         var shelfBadge = row.querySelector('.shelf-status');
                         if (shelfBadge) {
                             if (data.percentage >= 100) {
-                                shelfBadge.textContent = 'Full (' + data.occupied_count + '/4)';
+                                shelfBadge.textContent = 'Full (' + data.occupied_count + '/' + COLS + ')';
                                 shelfBadge.className = 'status-badge shelf-status shelf-full-badge';
                             } else {
-                                shelfBadge.textContent = 'Open (' + data.occupied_count + '/4)';
+                                shelfBadge.textContent = 'Open (' + data.occupied_count + '/' + COLS + ')';
                                 shelfBadge.className = 'status-badge shelf-status shelf-open-badge';
                             }
                         }
@@ -1111,6 +1117,16 @@
                             storeBtn.disabled = false;
                             storeBtn.textContent = 'Store Finished Order';
                             storeBtn.dataset.slotIndex = data.next_available;
+                        } else if (data.next_available_shelf) {
+                            // Shelf full — offer to continue on next shelf
+                            var moId2 = currentMOId;
+                            var whId2 = currentMOWarehouseId;
+                            storeBtn.style.display = '';
+                            storeBtn.disabled = false;
+                            storeBtn.textContent = 'Continue to ' + data.next_available_shelf;
+                            storeBtn.onclick = function () {
+                                Shelf3D.openForMO(data.next_available_shelf, moId2, whId2, onStoredCallback);
+                            };
                         } else {
                             storeBtn.textContent = 'Shelf Full';
                             storeBtn.disabled = true;
@@ -1179,11 +1195,6 @@
                 }
 
                 animatePalletDrop(slotIndex, function () {
-                    if (storeBtn) {
-                        storeBtn.textContent = 'Stored \u2714';
-                        storeBtn.disabled = true;
-                    }
-
                     // Rebuild slots to show the newly placed pallet
                     var refreshUrl = '/api/shelf-info/?shelf_id=' + encodeURIComponent(currentShelfId);
                     if (currentMOWarehouseId) refreshUrl += '&warehouse_id=' + currentMOWarehouseId;
@@ -1222,6 +1233,27 @@
                                     if (topdownAnimId) cancelAnimationFrame(topdownAnimId);
                                     var parts = currentShelfId.split('-');
                                     animateTopDown(topdownCanvas, info.occupied_slots, info.next_available, currentTargetShelf, parts[0], parts[1], [slotIndex]);
+                                }
+
+                                // Enable button for next slot, or handle shelf full / overflow
+                                if (storeBtn) {
+                                    if (info.next_available !== null) {
+                                        storeBtn.disabled = false;
+                                        storeBtn.textContent = 'Store Finished Order';
+                                        storeBtn.dataset.slotIndex = info.next_available;
+                                    } else if (info.next_available_shelf) {
+                                        // Current shelf full — auto-navigate to next shelf level
+                                        var moId = currentMOId;
+                                        var whId = currentMOWarehouseId;
+                                        storeBtn.disabled = false;
+                                        storeBtn.textContent = 'Continue to ' + info.next_available_shelf;
+                                        storeBtn.onclick = function () {
+                                            Shelf3D.openForMO(info.next_available_shelf, moId, whId, onStoredCallback);
+                                        };
+                                    } else {
+                                        storeBtn.textContent = 'Shelf Full';
+                                        storeBtn.disabled = true;
+                                    }
                                 }
                             }
                         });

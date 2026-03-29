@@ -188,7 +188,7 @@ def shelf_info(request):
     pending_delivery = pending_qs.first()
     has_pending = pending_delivery is not None
     next_available_shelf = None
-    if cap['next_available'] is None and has_pending:
+    if cap['next_available'] is None:
         next_available_shelf = _find_next_shelf_in_rack(sector, unit, int(target_shelf), warehouse)
 
     # Pallet progress for the pending delivery
@@ -323,15 +323,11 @@ def generate_delivery(request):
     batch_id = f'BATCH-{prefix}-{random.randint(1000, 9999)}-{uuid.uuid4().hex[:4]}'
     size = random.choice(MATERIAL_SIZES)
 
-    # Find best shelf and cap quantity to what fits
-    shelf_id = _find_available_shelf(warehouse=warehouse)
+    # Pick quantity first, then find a shelf that can fit all pallets
     cfg = _get_warehouse_config(warehouse)
-    shelf_qs = ShelfSlot.objects.filter(shelf_id=shelf_id, is_occupied=True)
-    if warehouse:
-        shelf_qs = shelf_qs.filter(warehouse=warehouse)
-    shelf_free = cfg['slots_per_shelf'] - shelf_qs.count()
-    max_qty = min(4, max(1, shelf_free))
-    quantity = str(random.randint(1, max_qty))
+    quantity = random.randint(1, min(4, cfg['slots_per_shelf']))
+    shelf_id = _find_available_shelf(needed=quantity, warehouse=warehouse)
+    quantity = str(quantity)
 
     # Pick a random material
     material = Material.objects.order_by('?').first()
@@ -351,13 +347,24 @@ def generate_delivery(request):
 
 
 def _find_available_shelf(needed=1, warehouse=None):
-    """Find a shelf that can fit `needed` pallets. Returns shelf with most space."""
+    """Find the best shelf that can fit `needed` pallets.
+
+    Strategy — fill bottom-up, tightest-fit first:
+      1. Prefer shelves where `needed` pallets fit exactly or with minimal waste
+         (best-fit / tightest-fit) so larger empty shelves stay available for
+         bigger deliveries.
+      2. Among equal fits, prefer lower shelf numbers (bottom-up) within
+         the same rack, then lower sector/unit — keeps storage predictable.
+      3. If no shelf can fit all `needed`, fall back to the shelf with the
+         most free space so at least some pallets can be stored.
+    """
     cfg = _get_warehouse_config(warehouse)
     sectors = cfg['sectors']
     units = cfg['units']
     shelves_per_unit = cfg['shelves_per_unit']
     slots_per_shelf = cfg['slots_per_shelf']
 
+    # Build shelf list in deterministic order: sector → unit → shelf (bottom-up)
     all_shelves = []
     for s in sectors:
         for u in units:
@@ -372,25 +379,32 @@ def _find_available_shelf(needed=1, warehouse=None):
     for slot in qs.values('shelf_id').annotate(count=Count('id')):
         occupied_counts[slot['shelf_id']] = slot['count']
 
-    # Find shelf with most free space that can fit at least 1 pallet
-    best_shelf = None
-    best_free = 0
-    random.shuffle(all_shelves)  # randomize among equal candidates
+    # Categorise shelves
+    fits = []       # shelves where all `needed` pallets fit
+    partial = []    # shelves with some free space but not enough
     for shelf_id in all_shelves:
         occupied = occupied_counts.get(shelf_id, 0)
         free = slots_per_shelf - occupied
-        if free > best_free:
-            best_free = free
-            best_shelf = shelf_id
+        if free <= 0:
+            continue
+        if free >= needed:
+            fits.append((shelf_id, free))
+        else:
+            partial.append((shelf_id, free))
 
-    if best_shelf:
-        return best_shelf
+    if fits:
+        # Best-fit: pick the shelf with the least wasted space (tightest fit).
+        # Ties broken by list order (bottom-up, lowest sector/unit first).
+        fits.sort(key=lambda x: x[1])
+        return fits[0][0]
 
-    # Fallback
-    s = random.choice(sectors) if sectors else 1
-    u = random.choice(units) if units else 'A'
-    sh = random.randint(1, shelves_per_unit)
-    return f'{s}-{u}-{sh}'
+    if partial:
+        # Nothing fits entirely — pick the shelf with the most free space
+        partial.sort(key=lambda x: -x[1])
+        return partial[0][0]
+
+    # Everything is full — return the first shelf (deterministic fallback)
+    return all_shelves[0] if all_shelves else '1-A-1'
 
 
 def _find_next_shelf_in_rack(sector, unit, current_shelf, warehouse=None):
